@@ -1,0 +1,16 @@
+# infra/docker-compose.yml
+services:
+  postgres:          # Gold tables + feature store
+    image: postgres:15
+    environment: {POSTGRES_DB: gold_ecommerce, ...}
+
+  airflow:           # pipeline orchestration
+    image: apache/airflow:2.8.0
+    depends_on: [postgres]
+
+  mlflow:            # experiment tracking + model registry
+    image: ghcr.io/mlflow/mlflow:v2.11.0
+    depends_on: [postgres]
+
+# Add later (sprint 4+):
+#  prometheus, grafana, jaeger, datahub, evidently
