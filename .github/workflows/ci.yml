@@ -10,6 +10,6 @@ jobs:
         with: {python-version: '3.13'}
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
-      - run: ruff check .
-      - run: pytest --cov=src tests/ -v
+      - run: uv run ruff check .
+      - run: uv run pytest --cov=src tests/ -v
 
