@@ -1,0 +1,161 @@
+n_customers: 120000
+n_products: 45000
+days_history: 180
+#skew_ratio_city: 0.85  # 85% HCMC
+#skew_ratio_category: 0.80  # 80% Electronics
+duplicate_rate_offline: 0.02
+schema_change_date: "2026-06-03"
+base_events_per_min: 100
+burst_multiplier: 30
+burst_windows: ["12:00-12:20", "20:00-20:20"]
+late_arrival_rate: 0.12
+late_delay_min_max: [5, 45]
+duplicate_rate_stream: 0.015
+random_seed: 42
+avg_orders_per_customer: 3.0    # controls order volume via Poisson draw
+avg_items_per_order: 2.5        # controls order_items volume
+marketing_opt_in_rate: 0.7   # 70% of customers opt in for marketing
+
+# ── Countries (customer) ─────────────────────────────────────────
+countries:
+  - VN
+  - US
+  - JP
+  - KR
+  - CN
+country_distribution:
+  VN: 0.85
+  US: auto
+  JP: auto
+  KR: auto
+  CN: auto
+# ── Cities (shipping) ─────────────────────────────────────────
+cities:
+  - Ho Chi Minh City
+  - Hanoi
+  - Da Nang
+  - Can Tho
+  - Bien Hoa
+cities_distribution:
+  Ho Chi Minh City: 0.85
+  Hanoi: auto
+  Da Nang: auto
+  Can Tho: auto
+  Bien Hoa: auto
+ 
+# ── Product categories ────────────────────────────────────────
+product_categories:
+  - electronics
+  - fashion
+  - home_living
+  - beauty
+  - sports
+  - books
+  - grocery
+  - toys
+category_distribution:
+  electronics: 0.8
+  fashion: auto
+  home_living: auto
+  beauty: auto
+  sports: auto
+  books: auto
+  grocery: auto
+  toys: auto
+
+brands: [
+  {category: "electronics", brands: ["Samsung", "Apple", "Sony", "LG", "Dell"]},
+  {category: "fashion", brands: ["Zara", "H&M", "Uniqlo", "Nike", "Adidas"]},
+  {category: "home_living", brands: ["IKEA", "Home Depot", "Lowe's", "Wayfair", "Bed Bath & Beyond"]},
+  {category: "beauty", brands: ["L'Oreal", "Maybelline", "Nivea", "Dove", "Clinique"]},
+  {category: "sports", brands: ["Nike", "Adidas", "Under Armour", "Puma", "Reebok"]},
+  {category: "books", brands: ["Penguin", "HarperCollins", "Simon & Schuster", "Hachette", "Macmillan"]},
+  {category: "grocery", brands: ["Walmart", "Kroger", "Costco", "Whole Foods", "Aldi"]},
+  {category: "toys", brands: ["LEGO", "Hasbro", "Mattel", "Fisher-Price", "Nerf"]},
+]
+brand_distribution: {
+  "electronics": [0.3, 0.25, 0.2, 0.15, 0.1],
+  "fashion": [0.25, 0.25, 0.2, 0.15, 0.15],
+  "home_living": [0.2, 0.25, 0.25, 0.15, 0.15],
+  "beauty": [0.3, 0.25, 0.2, 0.15, 0.1],
+  "sports": [0.25, 0.25, 0.2, 0.15, 0.15],
+  "books": [0.3, 0.25, 0.2, 0.15, 0.1],
+  "grocery": [0.25, 0.25, 0.2, 0.15, 0.15],
+  "toys": [0.3, 0.25, 0.2, 0.15, 0.1],
+}
+
+price_range:
+  electronics: [100, 2000]
+  fashion: [20, 500]
+  home_living: [30, 1500]
+  beauty: [10, 300]
+  sports: [25, 1200]
+  books: [5, 100]
+  grocery: [1, 50]
+  toys: [15, 400]
+ 
+# ── Customer segments ─────────────────────────────────────────
+customer_segments:
+  - gold
+  - silver
+  - bronze
+customer_segment_distribution:
+  gold: 0.1
+  silver: 0.3
+  bronze: 0.6
+ 
+# ── Payment methods ───────────────────────────────────────────
+payment_methods:
+  - credit_card
+  - bank_transfer
+  - e_wallet
+  - cod
+payment_method_distribution:
+  credit_card: 0.4
+  bank_transfer: 0.25
+  e_wallet: 0.25
+  cod: 0.1
+payment_statuses:
+  - paid
+  - failed
+  - refunded
+payment_status_distribution:
+  paid: 0.85
+  failed: 0.1
+  refunded: 0.05
+
+# ── Shipping methods ──────────────────────────────────────────
+shipping_methods:
+  - standard
+  - express
+  - same_day
+shipping_method_distribution:
+  standard: 0.7
+  express: 0.2
+  same_day: 0.1
+
+# ── Order statuses ────────────────────────────────────────────
+order_statuses:
+  - completed
+  - pending
+  - cancelled
+  - returned
+order_status_distribution:
+  completed: 0.8
+  pending: 0.05
+  cancelled: 0.1
+  returned: 0.05
+ 
+# ── Event types ───────────────────────────────────────────────
+event_types:
+  - view
+  - add_to_cart
+  - checkout
+  - purchase
+  - payment_failed
+event_type_distribution:
+  view: 0.50
+  add_to_cart: 0.20
+  checkout: 0.12
+  purchase: 0.10
+  payment_failed: 0.08
