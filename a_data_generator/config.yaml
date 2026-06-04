@@ -4,7 +4,7 @@ days_history: 180
 #skew_ratio_city: 0.85  # 85% HCMC
 #skew_ratio_category: 0.80  # 80% Electronics
 duplicate_rate_offline: 0.02
-schema_change_date: "2026-06-03"
+schema_change_date: "2025-03-24"
 base_events_per_min: 100
 burst_multiplier: 30
 burst_windows: ["12:00-12:20", "20:00-20:20"]
@@ -23,8 +23,8 @@ countries:
   - JP
   - KR
   - CN
-country_distribution:
-  VN: 0.85
+countries_distribution:
+  VN: 0.90
   US: auto
   JP: auto
   KR: auto
@@ -36,6 +36,7 @@ cities:
   - Da Nang
   - Can Tho
   - Bien Hoa
+
 cities_distribution:
   Ho Chi Minh City: 0.85
   Hanoi: auto
