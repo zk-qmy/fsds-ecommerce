@@ -63,27 +63,67 @@ category_distribution:
   grocery: auto
   toys: auto
 
-brands: [
-  {category: "electronics", brands: ["Samsung", "Apple", "Sony", "LG", "Dell"]},
-  {category: "fashion", brands: ["Zara", "H&M", "Uniqlo", "Nike", "Adidas"]},
-  {category: "home_living", brands: ["IKEA", "Home Depot", "Lowe's", "Wayfair", "Bed Bath & Beyond"]},
-  {category: "beauty", brands: ["L'Oreal", "Maybelline", "Nivea", "Dove", "Clinique"]},
-  {category: "sports", brands: ["Nike", "Adidas", "Under Armour", "Puma", "Reebok"]},
-  {category: "books", brands: ["Penguin", "HarperCollins", "Simon & Schuster", "Hachette", "Macmillan"]},
-  {category: "grocery", brands: ["Walmart", "Kroger", "Costco", "Whole Foods", "Aldi"]},
-  {category: "toys", brands: ["LEGO", "Hasbro", "Mattel", "Fisher-Price", "Nerf"]},
-]
-brand_distribution: {
-  "electronics": [0.3, 0.25, 0.2, 0.15, 0.1],
-  "fashion": [0.25, 0.25, 0.2, 0.15, 0.15],
-  "home_living": [0.2, 0.25, 0.25, 0.15, 0.15],
-  "beauty": [0.3, 0.25, 0.2, 0.15, 0.1],
-  "sports": [0.25, 0.25, 0.2, 0.15, 0.15],
-  "books": [0.3, 0.25, 0.2, 0.15, 0.1],
-  "grocery": [0.25, 0.25, 0.2, 0.15, 0.15],
-  "toys": [0.3, 0.25, 0.2, 0.15, 0.1],
-}
+# Branch
 
+brands:
+  - category: "electronics"
+    brands:
+      - {name: "Samsung",  weight: 0.30}
+      - {name: "Apple",    weight: 0.25}
+      - {name: "Sony",     weight: 0.20}
+      - {name: "LG",       weight: 0.15}
+      - {name: "Dell",     weight: 0.10}
+  - category: "fashion"
+    brands:
+      - {name: "Zara",     weight: 0.25}
+      - {name: "H&M",      weight: 0.25}
+      - {name: "Uniqlo",   weight: 0.20}
+      - {name: "Nike",     weight: 0.15}
+      - {name: "Adidas",   weight: 0.15}
+  - category: "home_living"
+    brands:
+      - {name: "IKEA",               weight: 0.20}
+      - {name: "Home Depot",         weight: 0.25}
+      - {name: "Lowe's",             weight: 0.25}
+      - {name: "Wayfair",            weight: 0.15}
+      - {name: "Bed Bath & Beyond",  weight: 0.15}
+  - category: "beauty"
+    brands:
+      - {name: "L'Oreal",    weight: 0.30}
+      - {name: "Maybelline", weight: 0.25}
+      - {name: "Nivea",      weight: 0.20}
+      - {name: "Dove",       weight: 0.15}
+      - {name: "Clinique",   weight: 0.10}
+  - category: "sports"
+    brands:
+      - {name: "Nike",          weight: 0.25}
+      - {name: "Adidas",        weight: 0.25}
+      - {name: "Under Armour",  weight: 0.20}
+      - {name: "Puma",          weight: 0.15}
+      - {name: "Reebok",        weight: 0.15}
+  - category: "books"
+    brands:
+      - {name: "Penguin",           weight: 0.30}
+      - {name: "HarperCollins",     weight: 0.25}
+      - {name: "Simon & Schuster",  weight: 0.20}
+      - {name: "Hachette",          weight: 0.15}
+      - {name: "Macmillan",         weight: 0.10}
+  - category: "grocery"
+    brands:
+      - {name: "Walmart",      weight: 0.25}
+      - {name: "Kroger",       weight: 0.25}
+      - {name: "Costco",       weight: 0.20}
+      - {name: "Whole Foods",  weight: 0.15}
+      - {name: "Aldi",         weight: 0.15}
+  - category: "toys"
+    brands:
+      - {name: "LEGO",          weight: 0.30}
+      - {name: "Hasbro",        weight: 0.25}
+      - {name: "Mattel",        weight: 0.20}
+      - {name: "Fisher-Price",  weight: 0.15}
+      - {name: "Nerf",          weight: 0.10}
+
+# Price ranges for each category to generate realistic prices
 price_range:
   electronics: [100, 2000]
   fashion: [20, 500]
