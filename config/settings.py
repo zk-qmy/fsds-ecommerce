@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     DATA_GENERATOR_CONFIG_PATH: str | None = None
     TEST_DATA_GENERATOR_CONFIG_PATH: str | None = None
+    DATA_GENERATOR_OUTPUT_PATH: str
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
