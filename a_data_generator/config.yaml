@@ -1,8 +1,8 @@
 n_customers: 120000
 n_products: 45000
 days_history: 180
-#skew_ratio_city: 0.85  # 85% HCMC
-#skew_ratio_category: 0.80  # 80% Electronics
+skew_ratio_city: 0.85  # 85% HCMC
+skew_ratio_category: 0.80  # 80% Electronics
 duplicate_rate_offline: 0.02
 schema_change_date: "2025-03-24"
 base_events_per_min: 100
