@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import sys
 from pathlib import Path
+import json
+import argparse
 
 # Add project root to path so `config` is resolvable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -35,7 +37,7 @@ class DataGenerator:
         output_path=settings.DATA_GENERATOR_OUTPUT_PATH,
     ):
         self.logger = setup_logger(name="DataGenerator")
-        self.output_path = output_path
+        self.output_path = Path(output_path)
         self.logger.info(f"Output_path: {output_path}")
         self.config = self._load_config(config_path)
         self.logger.info(f"Config path loaded: {config_path}")
@@ -60,7 +62,8 @@ class DataGenerator:
 
     def _save_as_csv(self, table: GeneratedTable):
         try:
-            path = Path(self.output_path) / f"{table.filename}.csv"
+            self.output_path.mkdir(parents=True, exist_ok=True)
+            path = self.output_path / f"{table.filename}.csv"
             self.logger.info(f"Table: `{table.filename}` saved to path: {path}")
             table.df.to_csv(path, index=False)
         except FileNotFoundError as e:
@@ -208,10 +211,10 @@ class DataGenerator:
         labels = list(dist.keys())
         probs = np.array(list(dist.values()))
         probs = probs / probs.sum()
-        self.logger.debug(f"Sampling from distribution: {dist} with probs: {probs}")
+        #self.logger.debug(f"Sampling from distribution: {dist} with probs: {probs}")
         return rng.choice(labels, size=size, p=probs)
 
-    def _generate_customers(self, cfg) -> pd.DataFrame:
+    def _generate_customers(self, cfg) -> GeneratedTable:
         """Generates a DataFrame of customers with the following schema:
         - customer_id: unique identifier (e.g., C000001)
         - signup_ts: timestamp of signup
@@ -255,7 +258,7 @@ class DataGenerator:
         filename = f"customer_{n}"
         return GeneratedTable(df=df, filename=filename)
 
-    def _generate_products(self, cfg) -> pd.DataFrame:
+    def _generate_products(self, cfg) -> GeneratedTable:
         """Generates a DataFrame of products with the following schema:
         - product_id: unique identifier (e.g., P000001)
         - category: one of the categories defined in cfg["product_categories"]
@@ -315,7 +318,7 @@ class DataGenerator:
         filename = f"products_{n}"
         return GeneratedTable(df=df, filename=filename)
 
-    def _generate_orders(self, customers, cfg) -> pd.DataFrame:
+    def _generate_orders(self, customers, cfg) -> GeneratedTable:
         """Generates a DataFrame of orders with the following schema:
         - order_id: unique identifier (e.g., O000001)
         - customer_id: foreign key to customers
@@ -325,7 +328,7 @@ class DataGenerator:
         - shipping_method: one of field in cfg["shipping_methods"] with probabilities defined in cfg["shipping_method_distribution"]
         - coupon_code: 20% of orders have a coupon code (e.g., SAVE20)
         """
-        # schema_change: if order_date < cfg.schema_change_date:
+        # schema_change: if order_timestamp < cfg.schema_change_date:
         #   coupon_code = None, shipping_method = None
         customers_df = self._to_df(customers)
         self.logger.info(f"[3/5] Generating {cfg["n_orders"]:,} orders …")
@@ -395,14 +398,14 @@ class DataGenerator:
         )
         # Add missing 60% shipping methods and coupon code from old timeline
         df["order_timestamp"] = pd.to_datetime(df["order_timestamp"])
-        old_mask = df["order_timestamp"] < cfg["schema_change_date"]
+        old_mask = df["order_timestamp"] < pd.Timestamp(cfg["schema_change_date"])
 
         df.loc[old_mask, "coupon_code"] = None
         df.loc[old_mask, "shipping_method"] = None
         filename = f"orders_{n}"
         return GeneratedTable(df=df, filename=filename)
 
-    def _generate_order_items(self, orders, products, cfg):
+    def _generate_order_items(self, orders, products, cfg) -> GeneratedTable:
         """Generates a DataFrame of order items with the following schema:
         - order_item_id: unique identifier (e.g., OI000001)
         - order_id: foreign key to orders
@@ -419,7 +422,7 @@ class DataGenerator:
         n = cfg["n_order_items"]
 
         # order_item_ids: OI000001, OI000002, ...
-        order_item_ids = [f"OI{str(i).zfill(6)}" for i in range(1, n + 1)]
+        order_item_ids = [f"OI{str(i).zfill(9)}" for i in range(1, n + 1)]
         # Sample order_ids from exisiting orders
         order_ids = rng.choice(orders_df["order_id"].values, size=n)
         # Sample product_ids from existing products
@@ -447,7 +450,7 @@ class DataGenerator:
         filename = f"order_items_{n}"
         return GeneratedTable(df=df, filename=filename)
 
-    def _generate_payments(self, orders, order_items, cfg):
+    def _generate_payments(self, orders, order_items, cfg) -> GeneratedTable:
         """Generates a DataFrame of payments with the following schema:
         - payment_id: unique identifier (e.g., P000001)
         - order_id: foreign key to orders
@@ -522,11 +525,434 @@ class DataGenerator:
         filename = f"payments_{n}"
         return GeneratedTable(df=df, filename=filename)
 
+    # ---------- STREAMING EVENTS -----------
+    """ (24-hour simulation)
+    Problems injected:
+    (d) Burst traffic at 12:00-12:20 and 20:00-20:20  (compulsory)
+    (e) 12 % late arrivals   created_ts > event_timestamp  (compulsory)
+    (f) 1.5 % duplicate event_ids                          (optional)
+    """
+
+    def _parse_burst_windows(self):
+        """windows: list[str]) -> list[tuple[int, int]"""
+
+        windows = self.config["burst_windows"]
+        result = []
+        for w in windows:
+            start_s, end_s = w.split("-")
+            sh, sm = map(int, start_s.split(":"))
+            eh, em = map(int, end_s.split(":"))
+            result.append((sh * 60 + sm, eh * 60 + em))
+        return result
+
+    def generate_stream_events(
+        self,
+        customers_df: pd.DataFrame,
+        products_df: pd.DataFrame,
+    ) -> list[dict]:
+        """
+        Simulates one full day of e-commerce clickstream events.
+
+        DATA PROBLEM D – burst traffic (compulsory):
+            Base rate = 100 events/min.
+            During burst windows (12:00-12:20, 20:00-20:20):
+                rate = 100 × 30 = 3 000 events/min.
+            Downstream streaming pipelines must handle backpressure;
+            Flink watermarks must tolerate the event-time gap.
+
+        DATA PROBLEM E – late arrivals (compulsory):
+            12 % of events have created_ts delayed by 5–45 minutes
+            after event_timestamp.  Flink's AllowedLateness /
+            WatermarkStrategy must be configured to handle these.
+
+        DATA PROBLEM F – duplicate event_ids (optional, chosen):
+            1.5 % of event_ids are re-emitted (same id, slight ts shift).
+            Stream dedup must key on event_id + event_timestamp.
+        """
+        print("[stream] Simulating 24-hour event stream …")
+        rng = np.random.default_rng(self.config["random_seed"] + 5)
+
+        customer_ids = customers_df["customer_id"].tolist()
+        product_ids = products_df["product_id"].tolist()
+        # event_types = self.config["event_types"]
+
+        burst_windows = self._parse_burst_windows()
+
+        # Sim base date = today
+        sim_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+        events = []
+        event_counter = 1
+
+        ev_dist = self._build_distribution_dirichlet(
+            self.config,
+            self.config["event_type_distribution"],
+            alpha=2.0
+        )
+        for minute in range(24 * 60):
+            # Burst multiplier (D)
+            rate = self.config["base_events_per_min"]
+            for start_m, end_m in burst_windows:
+                if start_m <= minute < end_m:
+                    rate = rate * self.config["burst_multiplier"]
+                    break
+
+            n_events = int(rng.poisson(rate))
+            base_ts = sim_date + timedelta(minutes=minute)
+
+            for _ in range(n_events):
+                # TODO: fix
+
+                ev_type = self._sample_from_distribution(
+                    rng, ev_dist, size=1)[0]
+
+                ev_ts = base_ts + timedelta(seconds=float(rng.uniform(0, 60)))
+                cid = rng.choice(customer_ids)
+                pid = (
+                    rng.choice(product_ids)
+                    if ev_type
+                    in ("view",
+                        "add_to_cart",
+                        "checkout",
+                        "purchase",
+                        "payment_failed"
+                        )
+                    else None
+                )
+                session = f"S{rng.integers(1, 999_999):08d}"
+
+                events.append(
+                    {
+                        "event_id": f"E{event_counter:012d}",
+                        "event_type": ev_type,
+                        "event_timestamp": ev_ts.isoformat(),
+                        "created_ts": ev_ts.isoformat(),  # overwritten below
+                        "customer_id": str(cid),
+                        "session_id": session,
+                        "product_id": str(pid) if pid else None,
+                        "order_id": None,
+                        "quantity": (
+                            int(rng.integers(1, 4))
+                            if ev_type in ("purchase", "add_to_cart")
+                            else None
+                        ),
+                        "price": (
+                            float(round(rng.uniform(10, 500), 2))
+                            if ev_type == "purchase"
+                            else None
+                        ),
+                    }
+                )
+                event_counter += 1
+
+        clean_count = len(events)
+
+        # LATE ARRIVAL injection (E)──
+        n_late = int(clean_count * self.config["late_arrival_rate"])
+        late_indices = rng.choice(clean_count, size=n_late, replace=False)
+        late_min, late_max = self.config["late_delay_min_max"]
+        for idx in late_indices.tolist():
+            ev_ts = datetime.fromisoformat(events[idx]["event_timestamp"])
+            delay = int(rng.integers(late_min, late_max + 1))
+            events[idx]["created_ts"] = (ev_ts + timedelta(minutes=delay)).isoformat()
+
+        # DUPLICATE injection (F)─────
+        n_dups = int(clean_count * self.config["duplicate_rate_stream"])
+        dup_indices = rng.choice(clean_count, size=n_dups, replace=False)
+        dups = []
+        for idx in dup_indices.tolist():
+            dup = dict(events[idx])
+            # Same event_id (the key dedup logic catches) but slight ts shift
+            shift = int(rng.integers(1, 4))  # 1–3 minutes
+            dup["created_ts"] = (
+                datetime.fromisoformat(events[idx]["created_ts"])
+                + timedelta(minutes=shift)
+            ).isoformat()
+            dups.append(dup)
+
+        all_events = events + dups
+
+        # Sort by created_ts (as a Kafka producer would emit)
+        all_events.sort(key=lambda e: e["created_ts"])
+
+        print(
+            f"    → {len(all_events):,} events  |  "
+            f"late={n_late:,} ({n_late/clean_count:.1%})  |  "
+            f"duplicates={n_dups:,} ({n_dups/clean_count:.1%})"
+        )
+        return all_events
+
+    # --------------- QUALITY REPORT ----------------------
+
+    def quality_report(
+        self,
+        customers_df: pd.DataFrame,
+        products_df: pd.DataFrame,
+        orders_df: pd.DataFrame,
+        order_items_df: pd.DataFrame,
+        payments_df: pd.DataFrame,
+        events: list[dict],
+    ) -> str:
+        """
+        Produce a human-readable quality report that is committed as evidence.
+        """
+        lines = [
+            "=" * 70,
+            "FSDS E-COMMERCE DATA GENERATOR — QUALITY REPORT",
+            f"Generated: {datetime.now().isoformat()} UTC",
+            f"Random seed: {self.config['random_seed']}",
+            "=" * 70,
+            "",
+            "OFFLINE TABLES---",
+            "",
+            "Table row counts:",
+            f"  customers  : {len(customers_df):>10,}",
+            f"  products   : {len(products_df):>10,}",
+            f"  orders     : {len(orders_df):>10,}",
+            f"  order_items: {len(order_items_df):>10,}  (includes injected dups)",
+            f"  payments   : {len(payments_df):>10,}",
+            "",
+        ]
+
+        # Cardinality
+        lines += [
+            "High-cardinality columns (approx unique):",
+            f"  customer_id unique : {customers_df['customer_id'].nunique():,}",
+            f"  product_id  unique : {products_df['product_id'].nunique():,}",
+            f"  order_id    unique : {orders_df['order_id'].nunique():,}",
+            "",
+        ]
+
+        # PROBLEM A: City skew
+        city_dist = orders_df["shipping_city"].value_counts(normalize=True)
+        lines += [
+            "PROBLEM A — Geographic skew in orders.shipping_city:",
+            f"  Target  : HCMC = {self.config['skew_ratio_city']:.0%}",
+            f"  Actual  : HCMC = {city_dist.iloc[0]:.1%}",
+        ]
+        for city, pct in city_dist.items():
+            lines.append(f"    {str(city):<25}: {pct:.1%}")
+        lines.append("")
+
+        # PROBLEM B: Schema evolution
+        change_date = self.config["schema_change_date"]
+        old_orders = orders_df[orders_df["order_timestamp"] < change_date.date().isoformat()]
+        new_orders = orders_df[
+            orders_df["order_timestamp"] >= change_date.date().isoformat()
+        ]
+        lines += [
+            "PROBLEM B — Schema evolution (orders before schema_change_date):",
+            f"  schema_change_date : {change_date.date()}",
+            f"  Old orders (<date) : {len(old_orders):,} rows",
+            f"    coupon_code NULL    : {old_orders['coupon_code'].isna().mean():.0%}  ← expected 100%",
+            f"    shipping_method NULL: {old_orders['shipping_method'].isna().mean():.0%}  ← expected 100%",
+            f"  New orders (>=date): {len(new_orders):,} rows",
+            f"    coupon_code NULL    : {new_orders['coupon_code'].isna().mean():.1%}  ← ~75% (no coupon)",
+            f"    shipping_method NULL: {new_orders['shipping_method'].isna().mean():.0%}  ← expected 0%",
+            "",
+        ]
+
+        # PROBLEM C: Duplicate order_items
+        natural_key = ["order_id", "product_id", "unit_price"]
+        total = len(order_items_df)
+        dup_mask = order_items_df.duplicated(subset=natural_key, keep=False)
+        n_dup_rows = dup_mask.sum()
+        after_dedup = order_items_df.drop_duplicates(subset=natural_key)
+        lines += [
+            "PROBLEM C — Duplicate rows in order_items:",
+            f"  Natural key         : {natural_key}",
+            f"  Total rows          : {total:,}",
+            f"  Duplicate rows      : {n_dup_rows:,}  ({n_dup_rows/total:.1%})",
+            f"  Target dup rate     : {self.config['duplicate_rate_offline']:.1%}",
+            f"  After dedup         : {len(after_dedup):,} rows",
+            "",
+        ]
+
+        # Category skew
+        cat_dist = products_df["category"].value_counts(normalize=True)
+        lines += [
+            "Category skew in products:",
+            f"  Target  : electronics = {self.config['skew_ratio_category']:.0%}",
+            f"  Actual  : electronics = {cat_dist.get('electronics', 0):.1%}",
+        ]
+        for cat, pct in cat_dist.items():
+            lines.append(f"    {str(cat):<20}: {pct:.1%}")
+        lines.append("")
+
+        # Payment failure rate
+        fail_rate = payments_df["payment_status"].eq("failed").mean()
+        lines += [
+            "Payment stats:",
+            f"  Failure rate        : {fail_rate:.1%}",
+            #f"  Retry rows          : {payments_df['attempt_number'].gt(1).sum():,}",
+            "",
+        ]
+
+        # STREAMING
+        lines.append("STREAMING EVENTS ---")
+        lines.append("")
+
+        if not events:
+            lines.append(
+                "  (stream skipped — run without --skip-stream to generate events)"
+            )
+        else:
+            events_df = pd.DataFrame(events)
+            total_events = len(events_df)
+
+            late_mask = events_df["created_ts"] > events_df["event_timestamp"]
+            n_late = late_mask.sum()
+
+            # Duplicate event_ids (same id = reemit)
+            n_dup_ev = events_df.duplicated(subset=["event_id"], keep=False).sum()
+
+            # Burst: events per minute
+            events_df["minute"] = (
+                pd.to_datetime(events_df["event_timestamp"]).dt.hour * 60
+                + pd.to_datetime(events_df["event_timestamp"]).dt.minute
+            )
+            epm = events_df.groupby("minute").size()
+            peak_minute = int(epm.idxmax())
+            peak_rate = int(epm.max())
+            median_rate = int(epm.median())
+
+            lines += [
+                f"Total events        : {total_events:,}",
+                "",
+                "PROBLEM D — Burst traffic:",
+                f"  Base rate          : {self.config['base_events_per_min']} events/min",
+                f"  Burst multiplier   : {self.config['burst_multiplier']}×",
+                f"  Burst windows      : {self.config['burst_windows']}",
+                f"  Median rate        : {median_rate} events/min",
+                f"  Peak rate          : {peak_rate:,} events/min (minute {peak_minute})",
+                "",
+                "PROBLEM E — Late arrivals:",
+                f"  Target rate        : {self.config['late_arrival_rate']:.0%}",
+                f"  Actual late rows   : {n_late:,} ({n_late/total_events:.1%})",
+                f"  Delay range        : {self.config['late_delay_min_max']} minutes",
+                "",
+                "PROBLEM F — Duplicate event_ids:",
+                f"  Target rate        : {self.config['duplicate_rate_stream']:.1%}",
+                f"  Duplicate rows     : {n_dup_ev:,} ({n_dup_ev/total_events:.1%})",
+                "",
+                "Event type distribution:",
+            ]
+            for ev_type, cnt in events_df["event_type"].value_counts().items():
+                lines.append(f"  {str(ev_type):<20}: {cnt:,}  ({cnt/total_events:.1%})")
+
+        lines += [
+            "",
+            "=" * 70,
+            "END OF REPORT",
+            "=" * 70,
+        ]
+
+        report = "\n".join(lines)
+        report_path = self.output_path / "quality_report.txt"
+        report_path.write_text(report, encoding="utf-8")
+        return report
+
+    # 10.  Write outputs
+
+    def write_outputs(
+        self,
+        customers_df: pd.DataFrame,
+        products_df: pd.DataFrame,
+        orders_df: pd.DataFrame,
+        order_items_df: pd.DataFrame,
+        payments_df: pd.DataFrame,
+        events: list[dict],
+    ):
+        # path = Path(self.output_path) / f"{table.filename}.csv"
+        offline_dir = self.output_path / "offline"
+        streaming_dir = self.output_path / "streaming"
+        offline_dir.mkdir(parents=True, exist_ok=True)
+        streaming_dir.mkdir(parents=True, exist_ok=True)
+
+        print("\n[write] Saving outputs …")
+
+        # Parquet (with pyarrow if available, else CSV fallback)
+        try:
+            import pyarrow  # noqa: F401
+
+            engine = "pyarrow"
+        except ImportError:
+            engine = "fastparquet" if self._has_fastparquet() else None
+
+        tables = {
+            "customers": customers_df,
+            "products": products_df,
+            "orders": orders_df,
+            "order_items": order_items_df,
+            "payments": payments_df,
+        }
+
+        for name, df in tables.items():
+            if engine:
+                path = offline_dir / f"{name}.parquet"
+                df.to_parquet(path, engine=engine, index=False)
+            else:
+                # Fallback: CSV (works everywhere; student converts locally)
+                path = offline_dir / f"{name}.csv"
+                df.to_csv(path, index=False)
+                print(f"    [WARN] pyarrow not found — wrote {name}.csv instead.")
+            print(f"    ✓ {name:<15}: {len(df):>9,} rows → {path}")
+
+        # Streaming JSON (newline-delimited)
+        events_path = streaming_dir / "events.json"
+        with open(events_path, "w") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev) + "\n")
+        print(f"    ✓ events         : {len(events):>9,} events → {events_path}")
+
+    def _has_fastparquet(self) -> bool:
+        try:
+            import fastparquet  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
 
 def main():
     generator = DataGenerator(config_path=settings.TEST_DATA_GENERATOR_CONFIG_PATH)
     customers, products, orders, order_items, payments = generator.generate()
 
+    parser = argparse.ArgumentParser(description="FSDS E-Commerce Data Generator")
+    parser.add_argument(
+        "--config",
+        default=str(Path(__file__).parent / "config.yaml"),
+        help="Path to config.yaml",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=str(Path(__file__).parent / "outputs"),
+        help="Directory for generated files",
+    )
+    parser.add_argument(
+        "--skip-stream",
+        action="store_true",
+        help="Skip streaming event generation (faster dev loop)",
+    )
+    args = parser.parse_args()
+    if args.skip_stream:
+        events = []
+        print("[stream] Skipped (--skip-stream flag)")
+    else:
+        events = generator.generate_stream_events(customers.df, products.df)
+
+    generator.write_outputs(
+        customers.df, products.df, orders.df, order_items.df, payments.df, events
+    )
+
+    print("\n[report] Writing quality report …")
+    report = generator.quality_report(
+        customers.df, products.df, orders.df, order_items.df, payments.df, events
+    )
+    print("\n" + report)
+    print(f"\n[done] All outputs in: {generator.output_path.resolve()}")
+
 
 if __name__ == "__main__":
     main()
+
