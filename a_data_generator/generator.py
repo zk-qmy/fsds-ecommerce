@@ -7,16 +7,13 @@ import sys
 from pathlib import Path
 import json
 import argparse
-
+from dataclasses import dataclass
 # Add project root to path so `config` is resolvable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 from config.settings import Settings
 from config.logging import setup_logger
 
 settings = Settings()
-
-from dataclasses import dataclass
 
 
 @dataclass
@@ -359,24 +356,12 @@ class DataGenerator:
             cfg, cfg["order_status_distribution"], alpha=2.0
         )
         statuses = self._sample_from_distribution(rng, status_dist, size=n)
-        # shipping_city
-        shipping_cities = []
-        # Fast — O(n) via dict lookup
-        country_lookup = dict(zip(customers_df["customer_id"], customers_df["country"]))
-        chosen_countries = [country_lookup[c] for c in chosen_customers]
-
-        vn_mask = np.array(chosen_countries) == "VN"
-        randoms = rng.random(n)
-        other_cities = [c for c in cfg["cities"] if c != "Ho Chi Minh City"]
-
-        shipping_cities = np.where(
-            vn_mask & (randoms < 0.95),
-            "Ho Chi Minh City",
-            [
-                rng.choice(other_cities) if vn else rng.choice(cfg["cities"])
-                for vn in vn_mask
-            ],
+        # shipping_city — sample directly from cities_distribution so HCMC hits the
+        # configured skew_ratio_city target exactly (Problem A).
+        city_dist = self._build_distribution_dirichlet(
+            cfg, cfg["cities_distribution"], alpha=2.0
         )
+        shipping_cities = self._sample_from_distribution(rng, city_dist, size=n)
         # shipping_method
         shipping_dist = self._build_distribution_dirichlet(
             cfg, cfg["shipping_method_distribution"], alpha=2.0
@@ -444,8 +429,11 @@ class DataGenerator:
                 "discount": discount_amount,
             }
         )
-        # after generation: inject 2% duplicates
-        dup_mask = df.sample(frac=0.02, random_state=42)
+        # Inject dup_rate/2 rows so the quality report's keep=False measurement
+        # (which marks both original and copy) reads back ≈ duplicate_rate_offline.
+        dup_mask = df.sample(
+            frac=cfg["duplicate_rate_offline"] / 2, random_state=42
+        )
         df = pd.concat([df, dup_mask], ignore_index=True)
         filename = f"order_items_{n}"
         return GeneratedTable(df=df, filename=filename)
@@ -647,8 +635,19 @@ class DataGenerator:
 
         clean_count = len(events)
 
+        # Pre-compute n_dups with /2 so the quality report's keep=False measurement
+        # (which marks both original and copy) reads back ≈ duplicate_rate_stream.
+        # Duplicate events always have created_ts > event_timestamp, so they are
+        # counted as "late" by the report.  Solve for n_late such that:
+        #   (n_late + n_dups) / (clean_count + n_dups) = late_arrival_rate
+        n_dups = int(clean_count * self.config["duplicate_rate_stream"] / 2)
+        total_with_dups = clean_count + n_dups
+        n_late = max(
+            0,
+            int(total_with_dups * self.config["late_arrival_rate"]) - n_dups,
+        )
+
         # LATE ARRIVAL injection (E)──
-        n_late = int(clean_count * self.config["late_arrival_rate"])
         late_indices = rng.choice(clean_count, size=n_late, replace=False)
         late_min, late_max = self.config["late_delay_min_max"]
         for idx in late_indices.tolist():
@@ -657,7 +656,6 @@ class DataGenerator:
             events[idx]["created_ts"] = (ev_ts + timedelta(minutes=delay)).isoformat()
 
         # DUPLICATE injection (F)─────
-        n_dups = int(clean_count * self.config["duplicate_rate_stream"])
         dup_indices = rng.choice(clean_count, size=n_dups, replace=False)
         dups = []
         for idx in dup_indices.tolist():
@@ -675,10 +673,11 @@ class DataGenerator:
         # Sort by created_ts (as a Kafka producer would emit)
         all_events.sort(key=lambda e: e["created_ts"])
 
+        total_events = len(all_events)
         print(
-            f"    → {len(all_events):,} events  |  "
-            f"late={n_late:,} ({n_late/clean_count:.1%})  |  "
-            f"duplicates={n_dups:,} ({n_dups/clean_count:.1%})"
+            f"    → {total_events:,} events  |  "
+            f"late={n_late + n_dups:,} ({(n_late + n_dups) / total_events:.1%})  |  "
+            f"duplicates (keep=False)={n_dups * 2:,} ({n_dups * 2 / total_events:.1%})"
         )
         return all_events
 
@@ -955,4 +954,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
