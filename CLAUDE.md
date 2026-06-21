@@ -18,31 +18,32 @@ The grader checks for runnable code + sample outputs + design write-ups.
 ```
 fsds-ecommerce/
 ├── a_data_generator/
-│   ├── config.yaml
-│   ├── generator.py          # DataGenerator class
+│   ├── config/
+│   │   └── generator_config.yaml
+│   ├── generator.py              # DataGenerator class
 │   ├── outputs/
-│   │   ├── offline/          # customers, products, orders, order_items, payments (.parquet)
-│   │   └── streaming/        # events.json (newline-delimited)
+│   │   ├── offline/              # customers, products, orders, order_items, payments (.parquet)
+│   │   └── streaming/            # events.json (newline-delimited)
 │   └── quality_report.txt
 ├── b_schema_pipelines/
 │   ├── pipelines/
-│   │   ├── bronze/           # ingest raw → Delta Lake
-│   │   ├── silver/           # dedup, clean, schema-evolution fill
-│   │   ├── gold/             # dim_*, fact_*, obt_*
-│   │   └── features/         # feat_customer_90d, feat_stream_60m, feat_customer_unified
-│   ├── dags/                 # Airflow DAGs per pipeline group
-│   ├── dq/                   # Great Expectations suites
+│   │   ├── bronze/               # ingest raw → Delta Lake
+│   │   ├── silver/               # dedup, clean, schema-evolution fill
+│   │   ├── gold/                 # dim_*, fact_*, obt_*
+│   │   └── features/             # feat_customer_90d, feat_stream_60m, feat_customer_unified
+│   ├── dags/                     # Airflow DAGs per pipeline group
+│   ├── dq/                       # Great Expectations suites
 │   └── docs/
 │       └── 02_schema_design.md
 ├── c_drift_labels/
-│   ├── generator_v2.py       # extends 01 with Scenario A drift
-│   ├── labels.py             # ml_customer_label builder
-│   ├── training_table.py     # point-in-time join → ml_customer_purchase_training
+│   ├── generator_v2.py           # extends Section 01 with Scenario A drift
+│   ├── labels.py                 # ml_customer_label builder
+│   ├── training_table.py         # point-in-time join → ml_customer_purchase_training
 │   └── docs/
 │       └── 03_drift_report.md
 ├── d_ml/
 │   ├── design/
-│   │   └── 04_ml_design.md   # HLD + LLD (write before coding)
+│   │   └── 04_ml_design.md       # HLD + LLD — write before coding
 │   ├── src/
 │   │   ├── training_data_service.py
 │   │   ├── split_service.py
@@ -54,20 +55,61 @@ fsds-ecommerce/
 │   │   ├── scoring_dag.py
 │   │   └── retrain_trigger_dag.py
 │   ├── api/
-│   │   └── main.py           # FastAPI /score endpoint
-│   └── cicd/
-│       └── .github/workflows/
-│           ├── ci_data_ml.yml
-│           ├── cd_inference.yml
-│           └── iac.yml
+│   │   ├── main.py               # FastAPI /score endpoint
+│   │   └── Dockerfile
+│   └── k8s/                      # raw K8s manifests (templated by Helm)
+│       ├── deployment.yaml
+│       ├── service.yaml
+│       ├── ingress.yaml
+│       ├── hpa.yaml
+│       └── deployment-canary.yaml
 ├── tests/
+│   ├── unit/
+│   └── integration/
 ├── infra/
-│   ├── docker-compose.yml    # postgres, airflow, mlflow, prometheus, grafana, jaeger
+│   ├── docker-compose.yml        # local dev: postgres, airflow, mlflow, minio, redis
+│   ├── helm/
+│   │   ├── inference-api/        # Chart.yaml, values*.yaml, templates/
+│   │   ├── airflow/
+│   │   ├── monitoring/
+│   │   ├── postgresql/
+│   │   ├── redis/
+│   │   ├── minio/
+│   │   ├── mlflow/
+│   │   ├── datahub/
+│   │   └── feast/
 │   ├── terraform/
-│   └── ansible/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   ├── outputs.tf
+│   │   └── modules/
+│   │       ├── gke/
+│   │       ├── vpc/
+│   │       ├── iam/
+│   │       ├── storage/
+│   │       └── postgres/
+│   ├── ansible/
+│   │   ├── inventory/
+│   │   │   ├── dev.ini
+│   │   │   └── prod.ini
+│   │   ├── playbooks/
+│   │   │   ├── install_kubectl.yml
+│   │   │   ├── install_helm.yml
+│   │   │   └── configure_gcloud.yml
+│   │   └── roles/
+│   │       └── k8s_tools/
+│   └── scripts/
+│       └── check_canary_health.sh
+├── .github/
+│   └── workflows/
+│       ├── ci_data_ml.yml
+│       ├── cd_data_ml.yml
+│       ├── ci_inference.yml
+│       ├── cd_inference.yml
+│       └── iac.yml
 ├── config/
 │   ├── logging.py
-│   └── settings.py           # Settings class (pydantic-settings)
+│   └── settings.py               # Settings class (pydantic-settings)
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
@@ -80,6 +122,7 @@ fsds-ecommerce/
 | Layer | Tool |
 |---|---|
 | Language | Python 3.13 |
+| Package manager | uv |
 | Data generation | numpy, pandas, faker, pyyaml |
 | Batch processing | PySpark + Delta Lake |
 | Stream processing | Apache Flink |
@@ -93,10 +136,11 @@ fsds-ecommerce/
 | Observability | Prometheus + Grafana + Jaeger + OpenTelemetry |
 | Drift detection | Evidently |
 | CI/CD | GitHub Actions (3 tracks) |
-| IaC | Terraform + Ansible |
-| Container | Docker + Docker Compose |
+| Container | Docker + Docker Compose (local dev only) |
+| Deployment | Kubernetes (GKE) + Helm |
+| IaC | Terraform (cluster) + Ansible (CI runner) |
 | Database | PostgreSQL 15 (Gold + feature store) |
-| Object storage | MinIO (Bronze/Silver Delta Lake) |
+| Object storage | MinIO / GCS (Bronze/Silver Delta Lake) |
 | Model registry | MLflow model registry |
 | Metadata/lineage | DataHub |
 
@@ -109,22 +153,24 @@ fsds-ecommerce/
 **Source tables (Section 01 outputs):**
 - `customers` — customer_id, signup_ts, country, segment, marketing_opt_in
 - `products` — product_id, category, brand, base_price, is_active, created_ts
-- `orders` — order_id, customer_id, order_timestamp, order_date, status, shipping_city, shipping_method, coupon_code
-- `order_items` — order_item_id, order_id, product_id, quantity, unit_price, discount_amount, line_net_amount
-- `payments` — payment_id, order_id, payment_timestamp, payment_method, amount, payment_status, attempt_number
+- `orders` — order_id, customer_id, order_timestamp, status, shipping_city, shipping_method, coupon_code
+- `order_items` — order_item_id, order_id, product_id, quantity, unit_price, discount_amount
+- `payments` — payment_id, order_id, payment_timestamp, payment_method, amount, payment_status
 
 **Gold schema: `gold_ecommerce`**
-- `dim_customer` (SCD2) — customer_key, customer_id (BK), segment, country, valid_from_ts, valid_to_ts, is_current
-- `dim_product` — product_key, product_id (BK), category, brand, base_price
-- `dim_date` — date_key, full_date, year, month, day, is_weekend
-- `fact_order` — order_key, customer_key, date_key, order_id, order_net_amount, item_count
-- `fact_order_item` — order_item_key, order_key, product_key, quantity, unit_price, line_net_amount
-- `fact_payment_attempt` — payment_key, order_key, payment_method, payment_status, amount, attempt_number
-- `obt_order_performance` — denormalised wide table for BI
+- `dim_customer` (SCD2) — customer_key, customer_id (BK), signup_ts, segment, country, marketing_opt_in, valid_from_ts, valid_to_ts, is_current
+- `dim_product` — product_key, product_id (BK), category, brand, base_price, is_active, created_ts
+- `dim_date` — date_key, calendar_date, day_of_week, month, year, is_weekend
+- `dim_payment_method` — payment_method_key (SK), payment_method (name)
+- `dim_order_status` — order_status_key (SK), order_status (name)
+- `fact_order` — order_key, customer_key, order_date_key, order_status_key, order_id, order_gross_amount, order_discount_amount, order_net_amount, item_count
+- `fact_order_item` — order_item_key, order_key, product_key, quantity, unit_price, discount_amount, line_net_amount
+- `fact_payment_attempt` — payment_key, order_key, payment_date_key, payment_method_key, amount, is_payment_success, is_payment_failed
+- `obt_order_performance` — denormalised wide table for BI (order_id, customer_id, order_timestamp, country, segment, total_quantity, order_net_amount, payment_status_last, shipping_city, coupon_code)
 
 **Feature tables:**
-- `feat_customer_90d` — customer_id, event_timestamp, created_ts, f_total_orders_90d, f_avg_order_value_90d, f_distinct_categories_90d, f_payment_fail_rate_90d
-- `feat_stream_60m` — customer_id, event_timestamp, created_ts, f_views_30m, f_add_to_cart_30m, f_cart_to_purchase_ratio_60m, f_burst_activity_flag
+- `feat_customer_90d` — customer_id, event_timestamp, created_ts, f_customer_total_orders_90d, f_customer_avg_order_value_90d, f_customer_distinct_categories_90d, f_customer_payment_fail_rate_90d
+- `feat_stream_60m` — customer_id, event_timestamp, created_ts, f_stream_views_30m, f_stream_add_to_cart_30m, f_stream_cart_to_purchase_ratio_60m, f_stream_burst_activity_flag
 - `feat_customer_unified` — point-in-time join of above two
 
 **ML tables:**
@@ -146,7 +192,7 @@ These are deliberate. Do not treat them as bugs when you see them in the data.
 |---|---|---|---|
 | A — City skew | orders | 85% shipping_city = 'Ho Chi Minh City' | Silver: no special handling; Gold: partitioned by city |
 | B — Schema evolution | orders | coupon_code + shipping_method = NULL before schema_change_date | Silver: fill NULL → 'LEGACY' / 'UNKNOWN' |
-| C — Duplicate rows | order_items | 2% rows duplicated by (order_id, product_id, unit_price) | Silver: dedup, keep earliest created_ts |
+| C — Duplicate rows | order_items | 2% rows duplicated by (order_id, product_id, quantity, unit_price) | Silver: dedup, keep earliest created_ts |
 | D — Burst traffic | events stream | 30× rate at 12:00–12:20 and 20:00–20:20 | Flink: watermarks + backpressure config |
 | E — Late arrivals | events stream | 12% events: created_ts delayed 5–45 min after event_timestamp | Flink: AllowedLateness + WatermarkStrategy |
 | F — Duplicate events | events stream | 1.5% duplicate event_ids with slight ts shift | Stream dedup: key on event_id + event_timestamp |
@@ -168,159 +214,143 @@ Time-based split only — never random split (prevents future data leakage):
 - test: last 15%
 
 ### 5 HLD decisions
-1. **Security** — training data readable only by svc-training service account; inference API uses Bearer token auth; secrets via env vars never hardcoded
-2. **Resilience** — 3 retries + exponential backoff on all jobs; scoring_job is partition-idempotent; canary auto-rollback if health check fails at t+5min
+1. **Security** — training data readable only by svc-training service account; inference API uses Bearer token auth; secrets in K8s Secrets, never hardcoded or in env files
+2. **Resilience** — 3 retries + exponential backoff on all Airflow jobs; scoring_job is partition-idempotent; canary auto-rollback via Helm if health check fails at t+5min
 3. **Serving pattern** — batch precompute (weekly training + PSI-triggered retrain); scores written to ml_customer_scores table; trade-off: 24h staleness vs operational simplicity
-4. **Storage** — Bronze/Silver: Delta Lake on MinIO; Gold/Features: PostgreSQL; model artifacts: MLflow local store; logs: 90-day retention structured JSON
-5. **Routing** — FastAPI /score endpoint behind NGINX; versioned via ?model_version=latest; rate limit 100 req/s
+4. **Storage** — Bronze/Silver: Delta Lake on MinIO/GCS; Gold/Features: PostgreSQL (Cloud SQL in prod); model artifacts: MLflow registry; logs: 90-day retention structured JSON
+5. **Routing** — FastAPI /score behind NGINX Ingress Controller on GKE; K8s Service round-robin across pods; HPA scales 2–8 pods at CPU 70%; rate limit 100 req/s via Ingress annotation
 
 ### 5 LLD classes
 - `TrainingDataService` — reads ml_customer_purchase_training, validates schema, deduplicates by created_ts
 - `SplitService` — time-based train/val/test split, enforces no leakage
 - `ModelService` — train, evaluate (F1/precision/recall/PR-AUC), save to MLflow, load from registry
-- `ScoringService` — score_batch, score_online, write_scores to ml_customer_scores
-- `MonitoringService` — publish_model_metrics, compute_psi, trigger_alerts, write to agg_feature_health_daily
+- `ScoringService` — score_batch, score_online, score_stream, write_scores to ml_customer_scores
+- `MonitoringService` — publish_model_metrics, publish_drift_metrics, trigger_alerts, write to agg_feature_health_daily
 
 ### Acceptance threshold
 - F1 >= 0.60 on test set to register model
 - Candidate must beat production F1 by >= 0.02 to be promoted
 
 ---
-Looking at the `CLAUDE.md`, it's mentioned in two places but never fully detailed — the HLD decision 5 (Routing) and Track B CI/CD. That's not enough for the grader.
 
-Add this section into the `CLAUDE.md` between the **ML system design** and **Pipeline structure** sections:
-
----
 ## Inference serving & routing
 
 ### Architecture
 
 ```
-Client
-  │
-  ▼
-NGINX (reverse proxy + load balancer)   ← port 80/443
-  │
-  ├── /score        → FastAPI inference service (port 8000)
-  ├── /health       → FastAPI health check
-  └── /metrics      → Prometheus scrape endpoint (port 9090)
+Internet
+    │
+    ▼
+GKE Ingress (NGINX Ingress Controller)   ← external IP, port 443
+    │
+    ▼
+NGINX Ingress Resource (namespace: ml-serving)
+    │
+    ├── /score    → inference-api Service (ClusterIP :80)
+    │                   │
+    │                   ├── api Pod 1 (FastAPI :8000)
+    │                   └── api Pod 2 (FastAPI :8000)
+    │                   HPA: 2–8 pods, scale at CPU 70%
+    │
+    └── /health   → inference-api Service (liveness check)
 ```
 
-### NGINX responsibilities
+### NGINX Ingress Controller responsibilities
 
-1. **Reverse proxy** — forwards /score requests to FastAPI upstream
-2. **Load balancing** — round-robin across multiple FastAPI replicas
-3. **Rate limiting** — 100 req/s per IP (protects model from abuse)
-4. **SSL termination** — handles HTTPS, FastAPI only sees HTTP internally
-5. **Request buffering** — absorbs traffic spikes before they hit the model
+1. **Reverse proxy** — routes external HTTPS to inference-api ClusterIP Service
+2. **Load balancing** — K8s Service handles round-robin across FastAPI pods
+3. **Rate limiting** — 100 req/s per IP via Ingress annotation
+4. **SSL termination** — TLS cert managed by cert-manager; FastAPI sees plain HTTP
+5. **Canary routing** — traffic splitting via NGINX Ingress canary annotations during rollout
 
-### NGINX config (infra/nginx/nginx.conf)
-
-```nginx
-upstream inference_api {
-    # round-robin across 2 FastAPI replicas
-    server api_1:8000;
-    server api_2:8000;
-
-    # mark a replica down after 3 failed health checks
-    # bring it back after 1 success
-}
-
-server {
-    listen 80;
-
-    # rate limiting: 100 req/s, burst up to 20
-    limit_req_zone $binary_remote_addr zone=score_limit:10m rate=100r/s;
-
-    location /score {
-        limit_req zone=score_limit burst=20 nodelay;
-        proxy_pass         http://inference_api;
-        proxy_set_header   Host $host;
-        proxy_set_header   X-Real-IP $remote_addr;
-        proxy_read_timeout 30s;
-    }
-
-    location /health {
-        proxy_pass http://inference_api/health;
-        access_log off;   # don't pollute logs with health check noise
-    }
-}
-```
-
-### Docker Compose wiring (infra/docker-compose.yml)
+### Key Helm values (infra/helm/inference-api/values.yaml)
 
 ```yaml
-services:
-  nginx:
-    image: nginx:1.25-alpine
-    ports:
-      - "80:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - api_1
-      - api_2
-
-  api_1:
-    build: ../04_ml/api
-    environment:
-      - MODEL_VERSION=Production
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-    expose:
-      - "8000"
-
-  api_2:
-    build: ../04_ml/api
-    environment:
-      - MODEL_VERSION=Production
-      - MLFLOW_TRACKING_URI=http://mlflow:5000
-    expose:
-      - "8000"
+replicaCount: 2
+image:
+  repository: gcr.io/YOUR_PROJECT/inference-api
+  tag: latest
+  pullPolicy: Always
+service:
+  type: ClusterIP
+  port: 80
+ingress:
+  enabled: true
+  host: api.fsds-ecommerce.com
+  rateLimitRps: "100"
+  tlsSecret: tls-secret
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+mlflow:
+  modelVersion: Production
+  trackingUri: http://mlflow.ml-serving.svc.cluster.local:5000
 ```
 
-### Canary deployment flow (Track B CD)
-
-During a model version upgrade, NGINX splits traffic between the
-current production replica and the canary replica:
+### Helm chart structure (infra/helm/inference-api/)
 
 ```
-Step 1 — deploy canary (10% traffic):
-  upstream inference_api {
-      server api_prod:8000  weight=9;
-      server api_canary:8000 weight=1;
-  }
+infra/helm/inference-api/
+├── Chart.yaml
+├── values.yaml           # defaults
+├── values-dev.yaml       # dev cluster overrides
+├── values-staging.yaml   # staging overrides
+├── values-prod.yaml      # production overrides
+└── templates/
+    ├── deployment.yaml
+    ├── service.yaml
+    ├── ingress.yaml
+    ├── hpa.yaml
+    └── secret.yaml
+```
 
-Step 2 — monitor for 5 minutes:
+### Canary deployment flow
+
+```
+Step 1 — deploy canary via Helm (1 pod alongside 2 stable ≈ 33% traffic):
+  helm upgrade --install inference-api-canary infra/helm/inference-api \
+    --namespace ml-serving \
+    --set image.tag=$SHA \
+    --set replicaCount=1 \
+    --set nameOverride=inference-api-canary \
+    -f infra/helm/inference-api/values-prod.yaml
+
+Step 2 — monitor 5 minutes via Prometheus:
   - p95 latency < 200ms
-  - error rate < 1%
-  - health check passes
+  - 5xx error rate < 1%
+  - readinessProbe passing on canary pod
 
-Step 3a — promote (if healthy):
-  upstream inference_api {
-      server api_canary:8000;   # canary becomes production
-  }
+Step 3a — promote (canary healthy):
+  helm upgrade inference-api infra/helm/inference-api \
+    --namespace ml-serving \
+    --set image.tag=$SHA \
+    -f infra/helm/inference-api/values-prod.yaml
+  helm uninstall inference-api-canary --namespace ml-serving
 
-Step 3b — rollback (if unhealthy):
-  upstream inference_api {
-      server api_prod:8000;     # revert immediately
-  }
+Step 3b — rollback (canary unhealthy):
+  helm uninstall inference-api-canary --namespace ml-serving
+  # stable Deployment untouched — traffic instantly restored
 ```
-
-The cd_inference.yml GitHub Actions workflow automates steps 1–3
-by rewriting the NGINX upstream config and sending `nginx -s reload`.
 
 ### HLD trade-off to document in 04_ml_design.md
 
 | Option | Chosen? | Reason |
 |---|---|---|
-| NGINX round-robin | Yes | Simple, zero extra dependencies, sufficient for coursework scale |
-| Istio service mesh | No | Overkill for 2 replicas; adds k8s dependency not justified at this scale |
-| AWS ALB / GCP LB | No | Cloud-managed but requires real cloud account and cost |
-| KServe autoscaling | No | Production-grade but adds significant operational complexity |
+| K8s + NGINX Ingress | Yes | Production-grade, native K8s, integrates with HPA and cert-manager |
+| Docker Compose + NGINX | No | Local dev only — no HA, no autoscaling |
+| Istio service mesh | No | Overkill for 2 services; significant complexity without benefit at this scale |
+| KServe | No | Adds operator dependency; plain K8s Deployment sufficient for a binary classifier |
+| GCP Cloud Run | No | Less control over autoscaling behaviour and cold start latency |
 
-State this explicitly in HLD decision 5 (Routing). The grader
-wants to see you know these options exist and made a reasoned choice.
-```
 ---
 
 ## Pipeline structure
@@ -328,8 +358,8 @@ wants to see you know these options exist and made a reasoned choice.
 ### Section 02 pipelines (Airflow DAGs)
 
 ```
-bronze_dag:   ingest raw parquet/json → Delta Lake (append, add metadata)
-silver_dag:   bronze → clean/dedup/fill → PostgreSQL staging
+bronze_dag:   ingest raw parquet/json → Delta Lake (append, add ingest metadata)
+silver_dag:   bronze → clean/dedup/schema-fill → PostgreSQL staging
 gold_dag:     silver → dim/fact/obt → gold_ecommerce schema  (schedule: */15 * * * *)
 feature_dag:  gold → feat_customer_90d + feat_stream_60m → feat_customer_unified
 ```
@@ -362,19 +392,206 @@ Retrain triggers:
 
 ---
 
+## Deployment plan
+
+### Environments
+
+| Environment | Namespace suffix | Triggered by | URL |
+|---|---|---|---|
+| dev | `-dev` | push to any feature branch | api-dev.fsds-ecommerce.com |
+| staging | `-staging` | merge to `develop` | api-staging.fsds-ecommerce.com |
+| production | (none) | merge to `main` | api.fsds-ecommerce.com |
+
+### GKE cluster structure
+
+```
+GKE Cluster: fsds-ecommerce (region: asia-southeast1)
+├── node-pool: default      e2-standard-4   data pipelines, monitoring, storage
+└── node-pool: ml-serving   e2-standard-2   inference API, autoscales 1–4 nodes
+
+Namespaces:
+├── data-pipelines    Airflow · Spark operator · Flink operator · Feast offline
+├── ml-serving        inference-api · MLflow · NGINX Ingress Controller
+├── monitoring        Prometheus · Grafana · Jaeger · Evidently
+├── storage           PostgreSQL · Redis · MinIO
+└── mlops             DataHub · Feast serving runtime
+```
+
+### Step-by-step deployment order (fresh cluster)
+
+```
+Step 1 — Provision infrastructure (Terraform)
+  cd infra/terraform
+  terraform init
+  terraform plan -out=tfplan
+  terraform apply tfplan
+  # provisions: GKE cluster, node pools, VPC, Cloud SQL,
+  #             GCS buckets, IAM service accounts, workload identity
+
+Step 2 — Configure CI runner (Ansible)
+  cd infra/ansible
+  ansible-playbook -i inventory/prod.ini playbooks/install_kubectl.yml
+  ansible-playbook -i inventory/prod.ini playbooks/install_helm.yml
+  ansible-playbook -i inventory/prod.ini playbooks/configure_gcloud.yml
+
+Step 3 — Connect kubectl + add Helm repos
+  gcloud container clusters get-credentials fsds-ecommerce \
+    --region asia-southeast1 --project YOUR_PROJECT_ID
+  helm repo add apache-airflow https://airflow.apache.org
+  helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  helm repo update
+
+Step 4 — Create namespaces
+  kubectl create namespace data-pipelines
+  kubectl create namespace ml-serving
+  kubectl create namespace monitoring
+  kubectl create namespace storage
+  kubectl create namespace mlops
+
+Step 5 — Deploy storage layer  (must be ready before all other services)
+  helm upgrade --install postgresql infra/helm/postgresql \
+    --namespace storage -f infra/helm/postgresql/values-prod.yaml
+  helm upgrade --install redis infra/helm/redis \
+    --namespace storage -f infra/helm/redis/values-prod.yaml
+  helm upgrade --install minio infra/helm/minio \
+    --namespace storage -f infra/helm/minio/values-prod.yaml
+  kubectl wait --for=condition=ready pod \
+    -l app=postgresql -n storage --timeout=120s
+
+Step 6 — Deploy monitoring stack
+  helm upgrade --install monitoring \
+    prometheus-community/kube-prometheus-stack \
+    --namespace monitoring \
+    -f infra/helm/monitoring/values-prod.yaml
+  helm upgrade --install jaeger infra/helm/jaeger \
+    --namespace monitoring
+  helm upgrade --install evidently infra/helm/evidently \
+    --namespace monitoring
+
+Step 7 — Deploy data pipeline services
+  helm upgrade --install airflow apache-airflow/airflow \
+    --namespace data-pipelines \
+    -f infra/helm/airflow/values-prod.yaml
+  # sync DAGs via ConfigMap
+  kubectl create configmap airflow-dags \
+    --from-file=b_schema_pipelines/dags/ \
+    --namespace=data-pipelines \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+Step 8 — Deploy MLops tools
+  helm upgrade --install datahub infra/helm/datahub \
+    --namespace mlops -f infra/helm/datahub/values-prod.yaml
+  helm upgrade --install feast infra/helm/feast \
+    --namespace mlops -f infra/helm/feast/values-prod.yaml
+
+Step 9 — Deploy inference stack  (MLflow must be ready before API starts)
+  helm upgrade --install mlflow infra/helm/mlflow \
+    --namespace ml-serving \
+    -f infra/helm/mlflow/values-prod.yaml
+  kubectl wait --for=condition=ready pod \
+    -l app=mlflow -n ml-serving --timeout=120s
+  helm upgrade --install inference-api infra/helm/inference-api \
+    --namespace ml-serving \
+    -f infra/helm/inference-api/values-prod.yaml
+
+Step 10 — Verify
+  kubectl get pods --all-namespaces
+  kubectl get ingress -n ml-serving
+  curl https://api.fsds-ecommerce.com/health
+```
+
+---
+
 ## CI/CD tracks
 
 ### Track A — Pipeline CI/CD (ci_data_ml.yml + cd_data_ml.yml)
-- CI: ruff lint → pytest (unit + integration) → DAG import check → schema validation
-- CD: deploy training DAG + scoring DAG + retrain trigger DAG on merge to main
+
+CI (every push):
+- ruff lint
+- pytest unit + integration tests
+- DAG import check (no circular dependencies)
+- schema validation tests
+
+CD (merge to main):
+```yaml
+- name: Authenticate to GKE
+  uses: google-github-actions/get-gke-credentials@v2
+  with:
+    cluster_name: fsds-ecommerce
+    location: asia-southeast1
+
+- name: Sync Airflow DAGs
+  run: |
+    kubectl create configmap airflow-dags \
+      --from-file=b_schema_pipelines/dags/ \
+      --namespace=data-pipelines \
+      --dry-run=client -o yaml | kubectl apply -f -
+```
 
 ### Track B — Inference service CI/CD (ci_inference.yml + cd_inference.yml)
-- CI: API contract tests → health check → smoke test (locust 10 req/s)
-- CD: docker build → canary deploy (10% traffic) → 5-min health check → promote or rollback
+
+CI (every push):
+- API contract tests (request/response schema)
+- health check endpoint test
+- smoke test (locust 10 req/s)
+
+CD (merge to main):
+```yaml
+- name: Build and push image
+  run: |
+    docker build -t gcr.io/$PROJECT_ID/inference-api:$SHA \
+      -f d_ml/api/Dockerfile .
+    docker push gcr.io/$PROJECT_ID/inference-api:$SHA
+
+- name: Deploy canary
+  run: |
+    helm upgrade --install inference-api-canary \
+      infra/helm/inference-api \
+      --namespace ml-serving \
+      --set image.tag=$SHA \
+      --set replicaCount=1 \
+      --set nameOverride=inference-api-canary \
+      -f infra/helm/inference-api/values-prod.yaml
+
+- name: Monitor canary (5 min)
+  run: bash infra/scripts/check_canary_health.sh
+
+- name: Promote or rollback
+  run: |
+    if [ "$CANARY_HEALTHY" = "true" ]; then
+      helm upgrade inference-api infra/helm/inference-api \
+        --namespace ml-serving \
+        --set image.tag=$SHA \
+        -f infra/helm/inference-api/values-prod.yaml
+      helm uninstall inference-api-canary --namespace ml-serving
+    else
+      helm uninstall inference-api-canary --namespace ml-serving
+      echo "Canary failed — stable deployment unchanged"
+      exit 1
+    fi
+```
 
 ### Track C — IaC CI/CD (iac.yml)
-- Stages: dev → staging → production
-- Jobs: terraform validate → terraform plan → terraform apply → post-check (services healthy)
+
+```yaml
+- name: Terraform init
+  run: terraform -chdir=infra/terraform init
+
+- name: Terraform validate
+  run: terraform -chdir=infra/terraform validate
+
+- name: Terraform plan
+  run: terraform -chdir=infra/terraform plan -out=tfplan
+
+- name: Terraform apply        # only on merge to main
+  if: github.ref == 'refs/heads/main'
+  run: terraform -chdir=infra/terraform apply tfplan
+
+- name: Verify cluster healthy
+  run: |
+    kubectl get nodes
+    kubectl get pods --all-namespaces | grep -v Running | grep -v Completed
+```
 
 ---
 
@@ -393,6 +610,41 @@ Observability stack: OpenTelemetry SDK instruments FastAPI → Jaeger (traces), 
 
 ---
 
+## Local development
+
+Docker Compose runs data pipeline services only.
+The inference stack is always deployed via Helm to the dev cluster — never locally.
+
+```
+infra/docker-compose.yml starts:
+  postgres    — mirrors Cloud SQL (Gold tables, feature store)
+  redis       — mirrors GCP Memorystore (online feature store)
+  mlflow      — mirrors GKE MLflow (experiment tracking)
+  airflow     — DAG development and testing
+  minio       — mirrors GCS (Bronze/Silver Delta Lake)
+```
+
+### Inference testing against dev cluster
+
+```bash
+# Point kubectl at dev cluster
+gcloud container clusters get-credentials fsds-ecommerce \
+  --region asia-southeast1 --project YOUR_PROJECT_ID
+
+# Deploy to dev namespace
+helm upgrade --install inference-api infra/helm/inference-api \
+  --namespace ml-serving-dev \
+  --create-namespace \
+  -f infra/helm/inference-api/values-dev.yaml
+
+# Test
+curl https://api-dev.fsds-ecommerce.com/score \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"customer_id": "C0000001", "features": {...}}'
+```
+
+---
+
 ## Key constraints and rules
 
 **Point-in-time correctness is mandatory.**
@@ -403,13 +655,16 @@ Any SQL join without `f.event_timestamp <= l.event_timestamp` is a data leakage 
 Re-running a job must not produce duplicate rows. Use INSERT ... ON CONFLICT DO UPDATE for PostgreSQL writes.
 
 **Never commit secrets.**
-All credentials go in .env (gitignored). Load via python-dotenv or pydantic-settings Settings class.
+All credentials go in K8s Secrets (prod) or .env (local, gitignored).
+Load via pydantic-settings Settings class. Never hardcode. Never put in Helm values files.
 
 **Design doc before code in every section.**
 Write the .md first. Implementation must match what is documented.
 
 **Every section needs run instructions.**
-The grader must be able to run `pip install -r requirements.txt && python <entry_point>` and see output.
+The grader must be able to clone the repo, follow the README, and see output.
+Local sections: `uv sync && python <entry_point>`.
+Deployed sections: Helm deploy steps + curl to verify.
 
 ---
 
@@ -453,30 +708,74 @@ Example: `city_distribution: {Ho Chi Minh City: 0.85, Hanoi: auto, ...}`
 ## Common commands
 
 ```bash
-# Start local platform
-docker compose -f infra/docker-compose.yml up -d
+# ── Infrastructure ─────────────────────────────────────────────────────────
+cd infra/terraform && terraform init && terraform apply
 
-# Run data generator (full)
-python 01_data_generator/generator.py
+gcloud container clusters get-credentials fsds-ecommerce \
+  --region asia-southeast1
 
-# Run generator (skip stream, fast dev loop)
-python 01_data_generator/generator.py --skip-stream
+# ── Helm deployments ───────────────────────────────────────────────────────
+# Deploy inference API to production
+helm upgrade --install inference-api infra/helm/inference-api \
+  --namespace ml-serving \
+  -f infra/helm/inference-api/values-prod.yaml
 
-# Run all tests
-pytest --cov=src tests/ -v
+# Deploy inference API to dev
+helm upgrade --install inference-api infra/helm/inference-api \
+  --namespace ml-serving-dev --create-namespace \
+  -f infra/helm/inference-api/values-dev.yaml
 
-# Lint
+# List all Helm releases across namespaces
+helm list --all-namespaces
+
+# ── K8s operations ─────────────────────────────────────────────────────────
+kubectl get pods -n ml-serving
+kubectl get pods -n data-pipelines
+kubectl get pods -n monitoring
+kubectl get hpa -n ml-serving
+kubectl get ingress -n ml-serving
+kubectl logs -n ml-serving -l app=inference-api -f
+kubectl describe pod -n ml-serving -l app=inference-api
+kubectl scale deployment inference-api --replicas=4 -n ml-serving
+
+# ── Port-forwarding for local UI access ────────────────────────────────────
+kubectl port-forward svc/mlflow 5000:5000 -n ml-serving
+kubectl port-forward svc/grafana 3000:3000 -n monitoring
+kubectl port-forward svc/airflow-webserver 8080:8080 -n data-pipelines
+
+# ── Data generator ─────────────────────────────────────────────────────────
+uv run python a_data_generator/generator.py
+uv run python a_data_generator/generator.py --skip-stream
+
+# ── Tests and lint ─────────────────────────────────────────────────────────
 ruff check .
+uv run pytest --cov=src tests/ -v
 
-# Trigger Airflow DAG manually
-airflow dags trigger gold_pipeline
+# ── Airflow DAG management ─────────────────────────────────────────────────
+# Sync DAGs to cluster
+kubectl create configmap airflow-dags \
+  --from-file=b_schema_pipelines/dags/ \
+  --namespace=data-pipelines \
+  --dry-run=client -o yaml | kubectl apply -f -
 
-# Run training pipeline manually
-airflow dags trigger ml_training_pipeline
+# Trigger pipelines manually
+kubectl exec -n data-pipelines \
+  $(kubectl get pod -n data-pipelines -l app=airflow-webserver -o name) \
+  -- airflow dags trigger bronze_dag
 
-# Check MLflow UI
-open http://localhost:5000
+kubectl exec -n data-pipelines \
+  $(kubectl get pod -n data-pipelines -l app=airflow-webserver -o name) \
+  -- airflow dags trigger gold_pipeline
 
-# Check Grafana
-open http://localhost:3000
+kubectl exec -n data-pipelines \
+  $(kubectl get pod -n data-pipelines -l app=airflow-webserver -o name) \
+  -- airflow dags trigger ml_training_pipeline
+
+kubectl exec -n data-pipelines \
+  $(kubectl get pod -n data-pipelines -l app=airflow-webserver -o name) \
+  -- airflow dags trigger ml_scoring_pipeline
+
+# ── Local dev (Docker Compose — data services only) ────────────────────────
+docker compose -f infra/docker-compose.yml up -d
+docker compose -f infra/docker-compose.yml down
 ```
