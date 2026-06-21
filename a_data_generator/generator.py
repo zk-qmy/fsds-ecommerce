@@ -8,6 +8,7 @@ from pathlib import Path
 import json
 import argparse
 from dataclasses import dataclass
+
 # Add project root to path so `config` is resolvable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config.settings import Settings
@@ -33,7 +34,7 @@ class DataGenerator:
         config_path=settings.DATA_GENERATOR_CONFIG_PATH,
         output_path=settings.DATA_GENERATOR_OUTPUT_PATH,
     ):
-        self.logger = setup_logger(name="DataGenerator")
+        self.logger = setup_logger(name="DataGenerator", filename="DataGenerator.log")
         self.output_path = Path(output_path)
         self.logger.info(f"Output_path: {output_path}")
         self.config = self._load_config(config_path)
@@ -208,7 +209,7 @@ class DataGenerator:
         labels = list(dist.keys())
         probs = np.array(list(dist.values()))
         probs = probs / probs.sum()
-        #self.logger.debug(f"Sampling from distribution: {dist} with probs: {probs}")
+        # self.logger.debug(f"Sampling from distribution: {dist} with probs: {probs}")
         return rng.choice(labels, size=size, p=probs)
 
     def _generate_customers(self, cfg) -> GeneratedTable:
@@ -431,9 +432,7 @@ class DataGenerator:
         )
         # Inject dup_rate/2 rows so the quality report's keep=False measurement
         # (which marks both original and copy) reads back ≈ duplicate_rate_offline.
-        dup_mask = df.sample(
-            frac=cfg["duplicate_rate_offline"] / 2, random_state=42
-        )
+        dup_mask = df.sample(frac=cfg["duplicate_rate_offline"] / 2, random_state=42)
         df = pd.concat([df, dup_mask], ignore_index=True)
         filename = f"order_items_{n}"
         return GeneratedTable(df=df, filename=filename)
@@ -573,9 +572,7 @@ class DataGenerator:
         event_counter = 1
 
         ev_dist = self._build_distribution_dirichlet(
-            self.config,
-            self.config["event_type_distribution"],
-            alpha=2.0
+            self.config, self.config["event_type_distribution"], alpha=2.0
         )
         for minute in range(24 * 60):
             # Burst multiplier (D)
@@ -591,20 +588,14 @@ class DataGenerator:
             for _ in range(n_events):
                 # TODO: fix
 
-                ev_type = self._sample_from_distribution(
-                    rng, ev_dist, size=1)[0]
+                ev_type = self._sample_from_distribution(rng, ev_dist, size=1)[0]
 
                 ev_ts = base_ts + timedelta(seconds=float(rng.uniform(0, 60)))
                 cid = rng.choice(customer_ids)
                 pid = (
                     rng.choice(product_ids)
                     if ev_type
-                    in ("view",
-                        "add_to_cart",
-                        "checkout",
-                        "purchase",
-                        "payment_failed"
-                        )
+                    in ("view", "add_to_cart", "checkout", "purchase", "payment_failed")
                     else None
                 )
                 session = f"S{rng.integers(1, 999_999):08d}"
@@ -735,7 +726,9 @@ class DataGenerator:
 
         # PROBLEM B: Schema evolution
         change_date = self.config["schema_change_date"]
-        old_orders = orders_df[orders_df["order_timestamp"] < change_date.date().isoformat()]
+        old_orders = orders_df[
+            orders_df["order_timestamp"] < change_date.date().isoformat()
+        ]
         new_orders = orders_df[
             orders_df["order_timestamp"] >= change_date.date().isoformat()
         ]
@@ -783,7 +776,7 @@ class DataGenerator:
         lines += [
             "Payment stats:",
             f"  Failure rate        : {fail_rate:.1%}",
-            #f"  Retry rows          : {payments_df['attempt_number'].gt(1).sum():,}",
+            # f"  Retry rows          : {payments_df['attempt_number'].gt(1).sum():,}",
             "",
         ]
 
