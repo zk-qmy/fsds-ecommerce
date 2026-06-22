@@ -226,10 +226,10 @@ class DataGenerator:
         # segs = cfg["customer_segments"]
 
         # customer_id: C000001, C000002, ...
-        customer_ids = [f"C{str(i).zfill(6)}" for i in range(1, n + 1)]
+        customer_ids = np.char.add("C", np.char.zfill(np.arange(1, n + 1).astype("U10"), 6))
         # signup_ts: random timestamps within the last cfg["days_history"] days
         sigup_deltas = rng.integers(0, cfg["days_history"] * 24 * 60 * 60, size=n)
-        signup_ts = [cfg["sim_start"] + timedelta(seconds=int(s)) for s in sigup_deltas]
+        signup_ts = pd.Timestamp(cfg["sim_start"]) + pd.to_timedelta(sigup_deltas, unit="s")
         # segment: skewed distribution with 60% bronze, 30% silver, 10% gold
         seg_weights = self._build_distribution_dirichlet(
             cfg, cfg["customer_segment_distribution"], alpha=2.0
@@ -274,35 +274,37 @@ class DataGenerator:
         # brands = cfg["brands"]
 
         # product_id: P000001, P000002, ...
-        product_ids = [f"P{str(i).zfill(6)}" for i in range(1, n + 1)]
+        product_ids = np.char.add("P", np.char.zfill(np.arange(1, n + 1).astype("U10"), 6))
         # category: random choice from cfg["product_categories"]
         category_dist = self._build_distribution_dirichlet(
             cfg, cfg["category_distribution"], alpha=2.0
         )
 
         categories = self._sample_from_distribution(rng, category_dist, size=n)
-        # brand: random choice from cfg["brands"]
-        brands = [
-            rng.choice(
-                cfg["_brand_names"][cat],
-                p=cfg["_brand_weights"][cat],
-            )
-            for cat in categories
-        ]
-        # base_price
+        # brand: random choice from cfg["brands"], vectorized per category
+        brands = np.empty(n, dtype=object)
+        for cat in cfg["product_categories"]:
+            mask = categories == cat
+            count = int(mask.sum())
+            if count > 0:
+                brands[mask] = rng.choice(
+                    cfg["_brand_names"][cat], size=count, p=cfg["_brand_weights"][cat]
+                )
+        # base_price — vectorized per category
         self.logger.info(f"Price range: {cfg['price_range']}")
         price_cfg = cfg["price_range"]
-        prices = [
-            round(rng.uniform(price_cfg[cat][0], price_cfg[cat][1]), 2)
-            for cat in categories
-        ]
+        prices = np.empty(n)
+        for cat in cfg["product_categories"]:
+            lo, hi = price_cfg[cat]
+            mask = categories == cat
+            count = int(mask.sum())
+            if count > 0:
+                prices[mask] = np.round(rng.uniform(lo, hi, size=count), 2)
         # is_active
         is_active = rng.random(n) < 0.9
         # created_ts
         created_deltas = rng.integers(0, cfg["days_history"] * 24 * 60 * 60, size=n)
-        created_ts = [
-            cfg["sim_start"] + timedelta(seconds=int(s)) for s in created_deltas
-        ]
+        created_ts = pd.Timestamp(cfg["sim_start"]) + pd.to_timedelta(created_deltas, unit="s")
         df = pd.DataFrame(
             {
                 "product_id": product_ids,
@@ -329,29 +331,20 @@ class DataGenerator:
         # schema_change: if order_timestamp < cfg.schema_change_date:
         #   coupon_code = None, shipping_method = None
         customers_df = self._to_df(customers)
-        self.logger.info(f"[3/5] Generating {cfg["n_orders"]:,} orders …")
+        self.logger.info(f"[3/5] Generating {cfg['n_orders']:,} orders …")
         rng = np.random.default_rng(cfg["random_seed"] + 2)
         n = cfg["n_orders"]
         # order_ids: O000001, O000002, ...
-        order_ids = [f"O{str(i).zfill(6)}" for i in range(1, n + 1)]
+        order_ids = np.char.add("O", np.char.zfill(np.arange(1, n + 1).astype("U10"), 6))
         # customer_id: random choice from customers.customer_id
         customer_ids = customers_df["customer_id"].values
-        customer_signup = dict(
-            zip(customers_df["customer_id"], customers_df["signup_ts"])
-        )
         chosen_customers = rng.choice(customer_ids, size=n)
-        # order_timestamp: random timestamp between customer's signup_ts and now
-        order_ts = [
-            customer_signup[cust]
-            + timedelta(
-                seconds=int(
-                    rng.integers(
-                        0, (cfg["sim_end"] - customer_signup[cust]).total_seconds()
-                    )
-                )
-            )
-            for cust in chosen_customers
-        ]
+        # order_timestamp: vectorized — uniform fraction of each customer's available window
+        signup_series = customers_df.set_index("customer_id")["signup_ts"]
+        chosen_signup = pd.to_datetime(signup_series.reindex(chosen_customers).values)
+        sim_end_ts = pd.Timestamp(cfg["sim_end"])
+        gaps_s = np.maximum(1, (sim_end_ts - chosen_signup).total_seconds().astype(np.int64))
+        order_ts = chosen_signup + pd.to_timedelta((rng.random(n) * gaps_s).astype(np.int64), unit="s")
         # status
         status_dist = self._build_distribution_dirichlet(
             cfg, cfg["order_status_distribution"], alpha=2.0
@@ -403,20 +396,19 @@ class DataGenerator:
         orders_df = self._to_df(orders)
         products_df = self._to_df(products)
 
-        self.logger.info(f"[4/5] Generating {cfg["n_order_items"]:,} order_items …")
+        self.logger.info(f"[4/5] Generating {cfg['n_order_items']:,} order_items …")
         rng = np.random.default_rng(cfg["random_seed"] + 3)
         n = cfg["n_order_items"]
 
-        # order_item_ids: OI000001, OI000002, ...
-        order_item_ids = [f"OI{str(i).zfill(9)}" for i in range(1, n + 1)]
+        # order_item_ids: OI000000001, OI000000002, ...
+        order_item_ids = np.char.add("OI", np.char.zfill(np.arange(1, n + 1).astype("U12"), 9))
         # Sample order_ids from exisiting orders
         order_ids = rng.choice(orders_df["order_id"].values, size=n)
         # Sample product_ids from existing products
         product_ids = rng.choice(products_df["product_id"].values, size=n)
         quantities = rng.integers(1, 11, size=n)
-        # Look up base_price for each sampled product
-        price_lookup = dict(zip(products_df["product_id"], products_df["base_price"]))
-        unit_prices = np.array([price_lookup[pid] for pid in product_ids])
+        # Look up base_price for each sampled product — vectorized via pandas reindex
+        unit_prices = products_df.set_index("product_id")["base_price"].reindex(product_ids).values
         # Discount: 0–30% of unit_price
         discount_amount = np.round(unit_prices * rng.uniform(0.0, 0.3, size=n), 2)
 
@@ -455,25 +447,15 @@ class DataGenerator:
         rng = np.random.default_rng(cfg["random_seed"] + 4)
         n = len(orders_df)
 
-        payment_ids = [f"PAY{str(i).zfill(6)}" for i in range(1, n + 1)]
+        payment_ids = np.char.add("PAY", np.char.zfill(np.arange(1, n + 1).astype("U10"), 6))
 
         # One payment per order
         order_ids = orders_df["order_id"].values
 
-        # Payment timestamp: between order_timestamp and sim_end
+        # Payment timestamp: vectorized — uniform fraction of window between order_ts and sim_end
         order_ts = pd.to_datetime(orders_df["order_timestamp"].values)
-        sim_end = cfg["sim_end"]
-        payment_ts = [
-            ts
-            + timedelta(
-                seconds=int(
-                    rng.integers(
-                        0, max(1, int((sim_end - ts.to_pydatetime()).total_seconds()))
-                    )
-                )
-            )
-            for ts in order_ts
-        ]
+        gaps_s = np.maximum(1, (pd.Timestamp(cfg["sim_end"]) - order_ts).total_seconds().astype(np.int64))
+        payment_ts = order_ts + pd.to_timedelta((rng.random(n) * gaps_s).astype(np.int64), unit="s")
 
         # Amount
         order_items_df["line_total"] = (
@@ -559,118 +541,103 @@ class DataGenerator:
         print("[stream] Simulating 24-hour event stream …")
         rng = np.random.default_rng(self.config["random_seed"] + 5)
 
-        customer_ids = customers_df["customer_id"].tolist()
-        product_ids = products_df["product_id"].tolist()
-        # event_types = self.config["event_types"]
-
+        customer_ids = customers_df["customer_id"].values
+        product_ids = products_df["product_id"].values
         burst_windows = self._parse_burst_windows()
-
-        # Sim base date = today
         sim_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-        events = []
-        event_counter = 1
+        # Per-minute rates (Problem D): build once, sample all minutes at once
+        rates = np.full(24 * 60, float(self.config["base_events_per_min"]))
+        for start_m, end_m in burst_windows:
+            rates[start_m:end_m] *= self.config["burst_multiplier"]
 
+        n_per_minute = rng.poisson(rates)
+        total = int(n_per_minute.sum())
+        minute_idx = np.repeat(np.arange(24 * 60), n_per_minute)
+
+        # Timestamps — one vectorized call per column
+        sim_ts = pd.Timestamp(sim_date)
+        ev_offsets_s = minute_idx * 60.0 + rng.uniform(0, 60, size=total)
+        ev_timestamps = sim_ts + pd.to_timedelta(ev_offsets_s, unit="s")
+
+        # Event types — single rng.choice for all events
         ev_dist = self._build_distribution_dirichlet(
             self.config, self.config["event_type_distribution"], alpha=2.0
         )
-        for minute in range(24 * 60):
-            # Burst multiplier (D)
-            rate = self.config["base_events_per_min"]
-            for start_m, end_m in burst_windows:
-                if start_m <= minute < end_m:
-                    rate = rate * self.config["burst_multiplier"]
-                    break
+        ev_type_labels = np.array(list(ev_dist.keys()))
+        ev_type_probs = np.array(list(ev_dist.values()), dtype=float)
+        ev_type_probs /= ev_type_probs.sum()
+        ev_types = rng.choice(ev_type_labels, size=total, p=ev_type_probs)
 
-            n_events = int(rng.poisson(rate))
-            base_ts = sim_date + timedelta(minutes=minute)
+        # Customer / product IDs — single rng.choice each
+        chosen_customers = rng.choice(customer_ids, size=total).astype(str)
+        chosen_products = rng.choice(product_ids, size=total).astype(str)
 
-            for _ in range(n_events):
-                # TODO: fix
+        # Session IDs
+        session_nums = rng.integers(1, 999_999, size=total)
+        session_ids = np.char.add("S", np.char.zfill(session_nums.astype("U10"), 8))
 
-                ev_type = self._sample_from_distribution(rng, ev_dist, size=1)[0]
+        # Event IDs
+        event_ids = np.char.add("E", np.char.zfill(np.arange(1, total + 1).astype("U15"), 12))
 
-                ev_ts = base_ts + timedelta(seconds=float(rng.uniform(0, 60)))
-                cid = rng.choice(customer_ids)
-                pid = (
-                    rng.choice(product_ids)
-                    if ev_type
-                    in ("view", "add_to_cart", "checkout", "purchase", "payment_failed")
-                    else None
-                )
-                session = f"S{rng.integers(1, 999_999):08d}"
+        # Conditional columns: generate full arrays, null out non-applicable rows
+        qty_mask = np.isin(ev_types, ["purchase", "add_to_cart"])
+        quantities = rng.integers(1, 4, size=total).astype(object)
+        quantities[~qty_mask] = None
 
-                events.append(
-                    {
-                        "event_id": f"E{event_counter:012d}",
-                        "event_type": ev_type,
-                        "event_timestamp": ev_ts.isoformat(),
-                        "created_ts": ev_ts.isoformat(),  # overwritten below
-                        "customer_id": str(cid),
-                        "session_id": session,
-                        "product_id": str(pid) if pid else None,
-                        "order_id": None,
-                        "quantity": (
-                            int(rng.integers(1, 4))
-                            if ev_type in ("purchase", "add_to_cart")
-                            else None
-                        ),
-                        "price": (
-                            float(round(rng.uniform(10, 500), 2))
-                            if ev_type == "purchase"
-                            else None
-                        ),
-                    }
-                )
-                event_counter += 1
+        price_mask = ev_types == "purchase"
+        prices = np.round(rng.uniform(10, 500, size=total), 2).astype(object)
+        prices[~price_mask] = None
 
-        clean_count = len(events)
-
-        # Pre-compute n_dups with /2 so the quality report's keep=False measurement
-        # (which marks both original and copy) reads back ≈ duplicate_rate_stream.
-        # Duplicate events always have created_ts > event_timestamp, so they are
-        # counted as "late" by the report.  Solve for n_late such that:
-        #   (n_late + n_dups) / (clean_count + n_dups) = late_arrival_rate
-        n_dups = int(clean_count * self.config["duplicate_rate_stream"] / 2)
-        total_with_dups = clean_count + n_dups
-        n_late = max(
-            0,
-            int(total_with_dups * self.config["late_arrival_rate"]) - n_dups,
-        )
-
-        # LATE ARRIVAL injection (E)──
-        late_indices = rng.choice(clean_count, size=n_late, replace=False)
+        # LATE ARRIVAL injection (E) — vectorized nanosecond arithmetic
+        n_dups = int(total * self.config["duplicate_rate_stream"] / 2)
+        total_with_dups = total + n_dups
+        n_late = max(0, int(total_with_dups * self.config["late_arrival_rate"]) - n_dups)
         late_min, late_max = self.config["late_delay_min_max"]
-        for idx in late_indices.tolist():
-            ev_ts = datetime.fromisoformat(events[idx]["event_timestamp"])
-            delay = int(rng.integers(late_min, late_max + 1))
-            events[idx]["created_ts"] = (ev_ts + timedelta(minutes=delay)).isoformat()
+        late_indices = rng.choice(total, size=n_late, replace=False)
+        late_delays_ns = rng.integers(late_min, late_max + 1, size=n_late).astype(np.int64) * 60 * 1_000_000_000
+        created_ns = ev_timestamps.asi8.copy()
+        created_ns[late_indices] += late_delays_ns
+        created_timestamps = pd.to_datetime(created_ns)
 
-        # DUPLICATE injection (F)─────
-        dup_indices = rng.choice(clean_count, size=n_dups, replace=False)
-        dups = []
-        for idx in dup_indices.tolist():
-            dup = dict(events[idx])
-            # Same event_id (the key dedup logic catches) but slight ts shift
-            shift = int(rng.integers(1, 4))  # 1–3 minutes
-            dup["created_ts"] = (
-                datetime.fromisoformat(events[idx]["created_ts"])
-                + timedelta(minutes=shift)
-            ).isoformat()
-            dups.append(dup)
+        # DUPLICATE injection (F) — slice + shift created_ts
+        dup_indices = rng.choice(total, size=n_dups, replace=False)
+        shift_ns = rng.integers(1, 4, size=n_dups).astype(np.int64) * 60 * 1_000_000_000
 
-        all_events = events + dups
+        # Stringify timestamps (vectorized strftime, not per-event isoformat loop)
+        fmt = "%Y-%m-%dT%H:%M:%S.%f"
+        ev_ts_str = ev_timestamps.strftime(fmt)
+        cr_ts_str = created_timestamps.strftime(fmt)
 
-        # Sort by created_ts (as a Kafka producer would emit)
-        all_events.sort(key=lambda e: e["created_ts"])
+        df = pd.DataFrame({
+            "event_id":        event_ids,
+            "event_type":      ev_types,
+            "event_timestamp": ev_ts_str,
+            "created_ts":      cr_ts_str,
+            "customer_id":     chosen_customers,
+            "session_id":      session_ids,
+            "product_id":      chosen_products,
+            "order_id":        None,
+            "quantity":        quantities,
+            "price":           prices,
+        })
 
-        total_events = len(all_events)
+        # Append duplicate rows with shifted created_ts
+        dup_df = df.iloc[dup_indices].copy()
+        dup_created_ns = created_ns[dup_indices] + shift_ns
+        dup_df["created_ts"] = pd.to_datetime(dup_created_ns).strftime(fmt)
+
+        all_df = pd.concat([df, dup_df], ignore_index=True)
+        all_df.sort_values("created_ts", inplace=True, ignore_index=True)
+
+        total_events = len(all_df)
+        n_late_total = n_late + n_dups
         print(
             f"    → {total_events:,} events  |  "
-            f"late={n_late + n_dups:,} ({(n_late + n_dups) / total_events:.1%})  |  "
+            f"late={n_late_total:,} ({n_late_total / total_events:.1%})  |  "
             f"duplicates (keep=False)={n_dups * 2:,} ({n_dups * 2 / total_events:.1%})"
         )
-        return all_events
+        return all_df.to_dict("records")
 
     # --------------- QUALITY REPORT ----------------------
 
@@ -907,10 +874,12 @@ class DataGenerator:
 
 
 def main():
-    generator = DataGenerator(config_path=settings.TEST_DATA_GENERATOR_CONFIG_PATH)
+    generator = DataGenerator(config_path=settings.DATA_GENERATOR_CONFIG_PATH)
     customers, products, orders, order_items, payments = generator.generate()
 
-    parser = argparse.ArgumentParser(description="FSDS E-Commerce Data Generator")
+    parser = argparse.ArgumentParser(
+        description="FSDS E-Commerce Data Generator"
+    )
     parser.add_argument(
         "--config",
         default=str(Path(__file__).parent / "config.yaml"),
