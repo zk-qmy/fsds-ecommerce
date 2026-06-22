@@ -72,3 +72,23 @@ After run that line, 2 folders: offline and streaming will be created in the out
 ## Sprint 6: Monitor & Ship
 
 **Goal:** Observability stack running, drift dashboard live, all 5 evidence checklist items satisfied, every section has run instructions and sample outputs. Final submission.
+
+## Git convention
+For new features:
+```bash
+git checkout develop
+git pull
+
+git checkout -b feature/new-feature
+```
+Then:
+
+```bash
+feature/new-feature
+       │
+       ▼
+     develop
+       │
+       ▼
+      main
+```
