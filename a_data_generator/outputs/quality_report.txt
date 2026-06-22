@@ -1,89 +1,89 @@
 ======================================================================
 FSDS E-COMMERCE DATA GENERATOR — QUALITY REPORT
-Generated: 2026-06-21T14:41:27.206681 UTC
+Generated: 2026-06-22T17:14:53.172842 UTC
 Random seed: 42
 ======================================================================
 
 OFFLINE TABLES---
 
 Table row counts:
-  customers  :      1,000
-  products   :      1,000
-  orders     :      3,000
-  order_items:      7,575  (includes injected dups)
-  payments   :      3,000
+  customers  :    120,000
+  products   :     45,000
+  orders     :    360,000
+  order_items:    909,000  (includes injected dups)
+  payments   :    360,000
 
 High-cardinality columns (approx unique):
-  customer_id unique : 1,000
-  product_id  unique : 1,000
-  order_id    unique : 3,000
+  customer_id unique : 120,000
+  product_id  unique : 45,000
+  order_id    unique : 360,000
 
 PROBLEM A — Geographic skew in orders.shipping_city:
   Target  : HCMC = 85%
-  Actual  : HCMC = 85.8%
-    Ho Chi Minh City         : 85.8%
-    Da Nang                  : 4.7%
-    Hanoi                    : 3.8%
-    Can Tho                  : 3.5%
-    Bien Hoa                 : 2.2%
+  Actual  : HCMC = 85.1%
+    Ho Chi Minh City         : 85.1%
+    Da Nang                  : 5.0%
+    Hanoi                    : 3.7%
+    Can Tho                  : 3.3%
+    Bien Hoa                 : 2.9%
 
 PROBLEM B — Schema evolution (orders before schema_change_date):
   schema_change_date : 2026-03-24
-  Old orders (<date) : 469 rows
+  Old orders (<date) : 54,063 rows
     coupon_code NULL    : 100%  ← expected 100%
     shipping_method NULL: 100%  ← expected 100%
-  New orders (>=date): 2,531 rows
+  New orders (>=date): 305,937 rows
     coupon_code NULL    : 79.9%  ← ~75% (no coupon)
     shipping_method NULL: 0%  ← expected 0%
 
 PROBLEM C — Duplicate rows in order_items:
   Natural key         : ['order_id', 'product_id', 'unit_price']
-  Total rows          : 7,575
-  Duplicate rows      : 160  (2.1%)
+  Total rows          : 909,000
+  Duplicate rows      : 18,058  (2.0%)
   Target dup rate     : 2.0%
-  After dedup         : 7,495 rows
+  After dedup         : 899,971 rows
 
 Category skew in products:
   Target  : electronics = 80%
-  Actual  : electronics = 80.4%
-    electronics         : 80.4%
-    home_living         : 4.4%
+  Actual  : electronics = 80.2%
+    electronics         : 80.2%
     books               : 4.0%
-    toys                : 2.7%
-    fashion             : 2.4%
-    beauty              : 2.4%
+    home_living         : 3.6%
+    toys                : 3.0%
+    fashion             : 2.7%
     grocery             : 2.3%
-    sports              : 1.4%
+    beauty              : 2.3%
+    sports              : 2.0%
 
 Payment stats:
-  Failure rate        : 9.9%
+  Failure rate        : 10.0%
 
 STREAMING EVENTS ---
 
-Total events        : 262,370
+Total events        : 262,106
 
 PROBLEM D — Burst traffic:
   Base rate          : 100 events/min
   Burst multiplier   : 30×
   Burst windows      : ['12:00-12:20', '20:00-20:20']
   Median rate        : 101 events/min
-  Peak rate          : 3,130 events/min (minute 723)
+  Peak rate          : 3,158 events/min (minute 1203)
 
 PROBLEM E — Late arrivals:
   Target rate        : 12%
-  Actual late rows   : 31,484 (12.0%)
+  Actual late rows   : 31,452 (12.0%)
   Delay range        : [5, 45] minutes
 
 PROBLEM F — Duplicate event_ids:
   Target rate        : 1.5%
-  Duplicate rows     : 3,906 (1.5%)
+  Duplicate rows     : 3,902 (1.5%)
 
 Event type distribution:
-  view                : 131,327  (50.1%)
-  add_to_cart         : 52,183  (19.9%)
-  checkout            : 31,661  (12.1%)
-  purchase            : 26,253  (10.0%)
-  payment_failed      : 20,946  (8.0%)
+  view                : 130,954  (50.0%)
+  add_to_cart         : 52,349  (20.0%)
+  checkout            : 31,480  (12.0%)
+  purchase            : 26,349  (10.1%)
+  payment_failed      : 20,974  (8.0%)
 
 ======================================================================
 END OF REPORT

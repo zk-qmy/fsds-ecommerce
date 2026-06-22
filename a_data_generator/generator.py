@@ -538,7 +538,7 @@ class DataGenerator:
             1.5 % of event_ids are re-emitted (same id, slight ts shift).
             Stream dedup must key on event_id + event_timestamp.
         """
-        print("[stream] Simulating 24-hour event stream …")
+        print("[stream] Simulating 24-hour event stream ...")
         rng = np.random.default_rng(self.config["random_seed"] + 5)
 
         customer_ids = customers_df["customer_id"].values
@@ -633,7 +633,7 @@ class DataGenerator:
         total_events = len(all_df)
         n_late_total = n_late + n_dups
         print(
-            f"    → {total_events:,} events  |  "
+            f"    -> {total_events:,} events  |  "
             f"late={n_late_total:,} ({n_late_total / total_events:.1%})  |  "
             f"duplicates (keep=False)={n_dups * 2:,} ({n_dups * 2 / total_events:.1%})"
         )
@@ -828,7 +828,7 @@ class DataGenerator:
         offline_dir.mkdir(parents=True, exist_ok=True)
         streaming_dir.mkdir(parents=True, exist_ok=True)
 
-        print("\n[write] Saving outputs …")
+        print("\n[write] Saving outputs ...")
 
         # Parquet (with pyarrow if available, else CSV fallback)
         try:
@@ -855,14 +855,14 @@ class DataGenerator:
                 path = offline_dir / f"{name}.csv"
                 df.to_csv(path, index=False)
                 print(f"    [WARN] pyarrow not found — wrote {name}.csv instead.")
-            print(f"    ✓ {name:<15}: {len(df):>9,} rows → {path}")
+            print(f"    [ok] {name:<15}: {len(df):>9,} rows -> {path}")
 
         # Streaming JSON (newline-delimited)
         events_path = streaming_dir / "events.json"
         with open(events_path, "w") as fh:
             for ev in events:
                 fh.write(json.dumps(ev) + "\n")
-        print(f"    ✓ events         : {len(events):>9,} events → {events_path}")
+        print(f"    [ok] events         : {len(events):>9,} events -> {events_path}")
 
     def _has_fastparquet(self) -> bool:
         try:
@@ -906,11 +906,11 @@ def main():
         customers.df, products.df, orders.df, order_items.df, payments.df, events
     )
 
-    print("\n[report] Writing quality report …")
-    report = generator.quality_report(
+    print("\n[report] Writing quality report ...")
+    generator.quality_report(
         customers.df, products.df, orders.df, order_items.df, payments.df, events
     )
-    print("\n" + report)
+    print(f"[report] Saved to: {generator.output_path.resolve() / 'quality_report.txt'}")
     print(f"\n[done] All outputs in: {generator.output_path.resolve()}")
 
 
