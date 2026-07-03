@@ -1,0 +1,15 @@
+quality:
+  expected_columns:
+    customers:  [customer_id, signup_ts, country, segment, marketing_opt_in]
+    products:   [product_id, category, brand, base_price, is_active, created_ts]
+    orders:     [order_id, customer_id, order_timestamp, status, shipping_city, shipping_method, coupon_code]
+    order_items: [order_item_id, order_id, product_id, quantity, unit_price, discount, line_total]
+    payments:   [payment_id, order_id, payment_timestamp, amount, payment_method, payment_status]
+    events:     [event_id, event_type, event_timestamp, created_ts, customer_id, session_id, product_id, order_id, quantity, price]
+  primary_keys:
+    customers:  [customer_id]
+    products:   [product_id]
+    orders:     [order_id]
+    order_items: [order_item_id]
+    payments:   [payment_id]
+    events:     [event_id]

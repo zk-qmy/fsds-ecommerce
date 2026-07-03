@@ -1,0 +1,21 @@
+storage:
+  backend: minio   # local | minio
+
+minio:
+  endpoint: http://localhost:9000   # override via MINIO_ENDPOINT for Docker/K8s
+  access_key: minio_access_key     # override via MINIO_ACCESS_KEY
+  secret_key: minio_secret_key     # override via MINIO_SECRET_KEY
+
+layers:
+  bronze:
+    local_path: ./b_schema_pipelines/delta_lake_data/bronze
+    bucket: bronze-data
+    prefix: bronze
+  silver:
+    local_path: ./b_schema_pipelines/delta_lake_data/silver
+    bucket: silver-data
+    prefix: silver
+  gold:
+    local_path: ./b_schema_pipelines/delta_lake_data/gold
+    bucket: gold-data
+    prefix: gold

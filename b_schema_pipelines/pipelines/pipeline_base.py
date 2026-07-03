@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import json
+import os
+from abc import ABC, abstractmethod
+from datetime import datetime
+from pathlib import Path
+
+import yaml
+from delta import configure_spark_with_delta_pip
+from pyspark.sql import SparkSession
+
+from config.logging import setup_logger
+
+
+class PipelineBase(ABC):
+    """
+    Common functionality shared by every pipeline stage.
+
+    Provides:
+        - run_id generation (PREFIX_YYYYMMDD_HHMMSS)
+        - config loading
+        - logger (console + rotating file via config.logging.setup_logger)
+        - log_table_start / log_run for per-table start/end telemetry
+        - log_delta_write for Delta Lake commit metrics
+    """
+
+    PREFIX: str = "BasePipeline"
+
+    _SHARED_CONFIG = Path(__file__).parent / "pipeline_config.yaml"
+
+    def __init__(self, config_file: str | None = None) -> None:
+        self.run_id: str = self._generate_run_id()
+
+        self.logger = setup_logger(
+            name=self.run_id,
+            log_dir=f"logs/{self.PREFIX}",
+            filename=f"{self.run_id}.log",
+        )
+
+        self.shared_cfg: dict = self._load_config(self._SHARED_CONFIG)
+        self.cfg: dict = self._load_config(config_file) if config_file else {}
+
+        self.logger.info(
+            "pipeline=%s  run_id=%s  phase=start",
+            self.PREFIX,
+            self.run_id,
+        )
+
+    def _resolve_s3_config(self, layer: str) -> tuple[str, dict | None]:
+        """Return (output_dir, s3_config) for the given layer.
+
+        Reads storage.backend, minio credentials, and layers.<layer> from
+        the shared pipeline_config.yaml. Adding a new layer is one YAML section.
+
+        MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY env vars override
+        the config values so the same YAML works across local, Docker, and K8s.
+        """
+        backend = self.shared_cfg["storage"]["backend"].lower()
+        layer_cfg = self.shared_cfg["layers"][layer]
+
+        if backend == "local":
+            # Resolve now — JVM cwd is /tmp after Spark startup and won't follow
+            # Python's os.chdir() restoration.
+            return str(Path(layer_cfg["local_path"]).resolve()), None
+
+        if backend == "minio":
+            minio = self.shared_cfg["minio"]
+            return (
+                f"s3a://{layer_cfg['bucket']}/{layer_cfg['prefix']}",
+                {
+                    "endpoint": os.environ.get("MINIO_ENDPOINT", minio["endpoint"]),
+                    "access_key": os.environ.get("MINIO_ACCESS_KEY", minio["access_key"]),
+                    "secret_key": os.environ.get("MINIO_SECRET_KEY", minio["secret_key"]),
+                },
+            )
+
+        raise ValueError(
+            f"Unsupported storage backend: {backend!r} (expected 'local' or 'minio')"
+        )
+
+    def _build_spark(self, s3_config: dict | None = None) -> SparkSession:
+        # WSL2: JVM cannot call getcwd() on drvfs (/mnt/*) paths.
+        # Temporarily switch to /tmp so the JVM subprocess inherits a valid cwd,
+        # then restore Python's cwd after getOrCreate() returns.
+        _cwd = os.getcwd()
+        os.chdir("/tmp")
+        try:
+            spark = self._create_spark_session(s3_config)
+        finally:
+            os.chdir(_cwd)
+        return spark
+
+    def _create_spark_session(self, s3_config: dict | None = None) -> SparkSession:
+        builder = (
+            SparkSession.builder
+            .master("local[*]")
+            .appName(self.PREFIX)
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config(
+                "spark.sql.catalog.spark_catalog",
+                "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+            )
+            .config("spark.sql.adaptive.enabled", "true")
+            .config("spark.sql.adaptive.skewJoin.enabled", "true")
+            # WSL: Java cannot resolve /mnt/d/... as its working dir; use /tmp instead.
+            .config("spark.local.dir", "/tmp/spark-local")
+            .config("spark.driver.host", "127.0.0.1")
+        )
+
+        s3a_endpoint = None
+        if s3_config:
+            # fs.s3a.endpoint wants host:port only — strip any http(s):// prefix.
+            s3a_endpoint = s3_config["endpoint"].removeprefix("https://").removeprefix("http://")
+            builder = (
+                builder
+                .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+                .config("spark.hadoop.fs.s3a.endpoint", s3a_endpoint)
+                .config("spark.hadoop.fs.s3a.access.key", s3_config["access_key"])
+                .config("spark.hadoop.fs.s3a.secret.key", s3_config["secret_key"])
+                .config("spark.hadoop.fs.s3a.path.style.access", "true")
+                .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
+                .config(
+                    "spark.hadoop.fs.s3a.aws.credentials.provider",
+                    "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
+                )
+            )
+
+        # configure_spark_with_delta_pip sets spark.jars for the Delta JARs.
+        # Append S3A JARs afterwards so both end up on the classpath.
+        # JARs live at /opt/spark-s3a/ — outside the /app/.venv volume mount.
+        builder = configure_spark_with_delta_pip(builder)
+
+        if s3_config:
+            _s3a_jars = (
+                "file:///opt/spark-s3a/hadoop-aws-3.3.4.jar,"
+                "file:///opt/spark-s3a/aws-java-sdk-bundle-1.12.262.jar"
+            )
+            _existing = builder._options.get("spark.jars", "")
+            builder = builder.config(
+                "spark.jars",
+                f"{_existing},{_s3a_jars}" if _existing else _s3a_jars,
+            )
+            self.logger.info("spark S3A → MinIO endpoint=%s", s3a_endpoint)
+
+        return builder.getOrCreate()
+
+    def _generate_run_id(self) -> str:
+        return f"{self.PREFIX}_{datetime.now():%Y%m%d_%H%M%S}"
+
+    def _load_config(self, config_file: str) -> dict:
+        path = Path(config_file)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        with open(path) as f:
+            return yaml.safe_load(f)
+
+    # ── logging helpers ───────────────────────────────────────────────────────
+
+    def log_table_start(self, table: str, source: str = "") -> None:
+        """Log the beginning of a per-table processing step."""
+        self.logger.info(
+            "[%s] phase=start  source=%s",
+            table,
+            source or "n/a",
+        )
+
+    def log_run(
+        self,
+        table: str,
+        start_ts: datetime,
+        end_ts: datetime,
+        input_rows: int,
+        output_rows: int,
+        status: str,
+        error: str = "",
+    ) -> None:
+        """Emit a structured run-log entry for one table pass.
+
+        Logs at ERROR level when status == 'error', INFO otherwise, so
+        Grafana/Loki alert rules fire on the correct severity.
+
+        JSON key names match the CLAUDE.md spec:
+            run_id, pipeline_name, table, start_ts, end_ts,
+            duration_s, input_rows, output_rows, status, error_summary
+        """
+        duration = round((end_ts - start_ts).total_seconds(), 3)
+        log_fn = self.logger.error if status == "error" else self.logger.info
+
+        # Human-readable summary line — easy to grep in terminal or Loki
+        log_fn(
+            "[%s] phase=end  status=%s  rows_in=%d  rows_out=%d  duration_s=%.3f%s",
+            table,
+            status,
+            input_rows,
+            output_rows,
+            duration,
+            f"  error={error!r}" if error else "",
+        )
+
+        # Structured JSON line — ingested by Loki, queried in Grafana
+        entry = {
+            "run_id": self.run_id,
+            "pipeline_name": self.PREFIX,
+            "table": table,
+            "start_ts": start_ts.isoformat(),
+            "end_ts": end_ts.isoformat(),
+            "duration_s": duration,
+            "input_rows": input_rows,
+            "output_rows": output_rows,
+            "status": status,
+            "error_summary": error,
+        }
+        self.logger.debug("STRUCTURED %s", json.dumps(entry))
+
+    def log_delta_write(
+        self,
+        table: str,
+        version: int | str,
+        rows_added: int | str,
+        files_added: int | str,
+        bytes_written: int | str,
+        duration_ms: int | str,
+    ) -> None:
+        """Log Delta Lake commit metrics after a write_deltalake call."""
+        self.logger.info(
+            "[%s] delta_commit  version=%s  rows_added=%s  files=%s  bytes=%s  duration_ms=%s",
+            table,
+            version,
+            rows_added,
+            files_added,
+            bytes_written,
+            duration_ms,
+        )
+
+    @abstractmethod
+    def run(self) -> None:
+        """Run the pipeline. Must be implemented by subclasses."""
