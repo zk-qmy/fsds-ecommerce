@@ -16,13 +16,16 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-
+import time
+import urllib.request
+import sys
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 
 from config.logging import setup_logger
 from b_schema_pipelines.pipelines.pipeline_base import PipelineBase
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
 OFFLINE_TABLES = ["customers", "products", "orders", "order_items", "payments"]
 
 
@@ -50,7 +53,7 @@ class FileReader:
         ]
         table = table.cast(pa.schema(new_fields))
         df = self.spark.createDataFrame(table.to_pandas())
-        self.logger.info("schema: %s  rows: %d", df.schema.simpleString(), df.count())
+        self.logger.info("schema: %s", df.schema.simpleString())
         return df
 
     def read_json(self, path: str):
@@ -89,7 +92,7 @@ class DeltaWriter:
     """Writes DataFrames to Delta Lake using PySpark's Delta connector.
 
     All metadata reads (table_exists, history, version) go through the same
-    SparkSession, so S3A credentials configured in _build_spark() cover both
+    SparkSession, so S3A credentials configured in _create_spark_session() cover both
     reads and writes uniformly.
     """
 
@@ -97,7 +100,7 @@ class DeltaWriter:
         self.spark = spark
         self.logger = setup_logger(name="DeltaWriter", filename="DeltaWriter.log")
 
-    def write(self, df, output_path: str, table: str, mode: str = "append") -> int:
+    def write(self, df, output_path: str, table: str, mode: str = "overwrite", row_count: int = 0) -> int:
         """Append df to a Delta table. Logs before/after state and commit metrics.
 
         Returns the number of rows written.
@@ -111,7 +114,7 @@ class DeltaWriter:
             )
 
         t0 = datetime.now()
-        rows_to_write = df.count()
+        rows_to_write = row_count
         self.logger.info(
             "[%s] Writing %d rows to %s", table, rows_to_write, output_path
         )
@@ -179,8 +182,7 @@ class BronzeIngester(PipelineBase):
     def __init__(self, source_dir: str | Path = "a_data_generator/outputs") -> None:
         super().__init__(config_file=Path(__file__).parent / "bronze_config.yaml")
         self.source_dir = Path(source_dir).resolve()
-        self.output_dir, s3_config = self._resolve_s3_config("bronze")
-        self.spark = self._build_spark(s3_config=s3_config)
+        self.output_dir, _ = self._resolve_s3_config("bronze")
         self.reader = FileReader(spark=self.spark)
         self.meta = MetadataManager(run_id=self.run_id)
         self.writer = DeltaWriter(spark=self.spark)
@@ -219,6 +221,7 @@ class BronzeIngester(PipelineBase):
             if not self.reader.exists(source_file):
                 raise FileNotFoundError(f"source file not found: {source_file}")
             df = read_fn(source_file)
+            df.cache()
             input_rows = df.count()
             rows_written = self._ingest_dataset(df, source_file, table, input_rows)
             self.log_run(
@@ -267,13 +270,41 @@ class BronzeIngester(PipelineBase):
         self._check_quality(df, table, row_count)
         output_path = f"{self.output_dir}/{table}"
         self.logger.info("[%s] writing to Delta Lake at %s", table, output_path)
-        return self.writer.write(df, output_path, table)
+        rows_written = self.writer.write(df, output_path, table, row_count=row_count)
+        df.unpersist()
+        return rows_written
+
+
+def wait_for_minio(retries: int = 15, delay: int = 2) -> None:
+    url = "http://localhost:9000/minio/health/live"
+    for i in range(retries):
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            print("  MinIO is ready.")
+            return
+        except Exception:
+            print(f"  Waiting for MinIO... ({i + 1}/{retries})")
+            time.sleep(delay)
+    print("  MinIO health check timed out — proceeding anyway.")
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
+    print("=== [0] Waiting for MinIO ===")
+    wait_for_minio()
+
+    print("\n=== [1] Creating buckets ===")
+    from minio_client import MinioClient
+    from utils.config import load_config
+    minio_client = MinioClient()
+    cfg = load_config("b_schema_pipelines/pipelines/pipeline_config.yaml")
+    buckets = [layer["bucket"] for layer in cfg["layers"].values()]
+    for bucket in buckets:
+        minio_client.create_bucket(bucket)
+
+    print("\n=== [2] Bronze — Delta table → MinIO ===")
     BronzeIngester().run()
 
 

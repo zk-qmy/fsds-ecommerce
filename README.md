@@ -26,6 +26,22 @@ uv sync
 Requires Python 3.13 and [uv](https://github.com/astral-sh/uv).
 
 ---
+## Handle .venv
+kill python process
+```powershell
+taskkill /F /IM python.exe /T 2>&1; taskkill /F /IM python3.exe /T 2>&1; Remove-Item -Recurse -Force D:\fsds-ecommerce\.venv 2>&1
+```
+
+delete .venv after killing python processes
+```powershell
+Remove-Item -Recurse -Force D:\fsds-ecommerce\.venv 2>&1; if (Test-Path D:\fsds-ecommerce\.venv) { "FAILED - still exists" } else { "DELETED OK" }
+```
+
+rerun .venv in wsl
+```bash
+uv sync
+source .venv/bin/activate
+```
 
 ## Section 01 — Data Generator
 

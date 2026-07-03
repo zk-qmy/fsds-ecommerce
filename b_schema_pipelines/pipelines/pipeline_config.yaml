@@ -1,10 +1,12 @@
-storage:
-  backend: minio   # local | minio
+packages:
+  - org.apache.hadoop:hadoop-aws:3.4.0
+  - com.amazonaws:aws-java-sdk-bundle:1.12.262
+  - io.delta:delta-spark_2.13:4.1.0
 
 minio:
-  endpoint: http://localhost:9000   # override via MINIO_ENDPOINT for Docker/K8s
-  access_key: minio_access_key     # override via MINIO_ACCESS_KEY
-  secret_key: minio_secret_key     # override via MINIO_SECRET_KEY
+  endpoint: http://localhost:9000
+  access_key: minio_access_key
+  secret_key: minio_secret_key
 
 layers:
   bronze:

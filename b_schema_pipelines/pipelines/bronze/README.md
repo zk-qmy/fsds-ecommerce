@@ -47,24 +47,50 @@ b_schema_pipelines/delta_lake_data/bronze/
 
 ## Running with MinIO (Docker)
 
-`b_schema_pipelines/pipelines/pipeline_config.yaml` must have:
-
-```yaml
-storage:
-  backend: minio
-```
-
-Start the services and run inside the container:
+**Step 1 — Start MinIO**
 
 ```bash
-docker compose -f infra/docker-compose.yml up -d
-docker compose -f infra/docker-compose.yml exec spark \
-  python3 -m b_schema_pipelines.pipelines.bronze.ingest_bronze
+docker compose -f infra/docker-compose.yml up -d minio
 ```
 
-Output is written to `s3a://bronze-data/bronze/` on MinIO. View results at [http://localhost:9001](http://localhost:9001) (login: `minio_access_key` / `minio_secret_key`).
+Verify it is healthy: [http://localhost:9001](http://localhost:9001) (login: `minio_access_key` / `minio_secret_key`)
 
-The container sets `MINIO_ENDPOINT=http://minio:9000` automatically — no extra env var needed.
+**Step 2 — Start the Spark History Server** (once, before running the pipeline)
+
+```bash
+cd /mnt/d/fsds-ecommerce
+source .venv/bin/activate
+
+export SPARK_HOME=$(python3 -c "import pyspark, os; print(os.path.dirname(pyspark.__file__))")
+mkdir -p /tmp/spark-events
+$SPARK_HOME/sbin/start-history-server.sh
+```
+
+If you see `HistoryServer running as process XXXX. Stop it first.` it is already running — skip this step.
+
+**Step 3 — Run the pipeline**
+
+```bash
+cd /mnt/d/fsds-ecommerce
+source .venv/bin/activate
+python3 b_schema_pipelines/pipelines/bronze/ingest_bronze.py
+```
+
+Output is written to `s3a://bronze-data/bronze/` on MinIO.
+
+**UIs**
+
+| UI | URL | Available |
+|---|---|---|
+| Spark UI (live DAGs, stages, tasks) | http://localhost:4040 | While the job is running |
+| Spark History Server (completed jobs) | http://localhost:18080 | After the job finishes |
+| MinIO Console (Delta files) | http://localhost:9001 | Once MinIO is started |
+
+To stop the History Server when done:
+
+```bash
+$SPARK_HOME/sbin/stop-history-server.sh
+```
 
 ---
 

@@ -6,11 +6,9 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 
-import yaml
-from delta import configure_spark_with_delta_pip
 from pyspark.sql import SparkSession
-
 from config.logging import setup_logger
+from utils.config import load_config
 
 
 class PipelineBase(ABC):
@@ -38,122 +36,82 @@ class PipelineBase(ABC):
             filename=f"{self.run_id}.log",
         )
 
-        self.shared_cfg: dict = self._load_config(self._SHARED_CONFIG)
-        self.cfg: dict = self._load_config(config_file) if config_file else {}
-
+        self.shared_cfg: dict = load_config(self._SHARED_CONFIG)
+        self.cfg: dict = load_config(config_file) if config_file else {}
+        self.logger.info("Starting spark...")
+        self.spark = self._create_spark_session(app_name=self.run_id)
+        self.logger.info("Spark started.")
         self.logger.info(
             "pipeline=%s  run_id=%s  phase=start",
             self.PREFIX,
             self.run_id,
         )
 
-    def _resolve_s3_config(self, layer: str) -> tuple[str, dict | None]:
-        """Return (output_dir, s3_config) for the given layer.
-
-        Reads storage.backend, minio credentials, and layers.<layer> from
-        the shared pipeline_config.yaml. Adding a new layer is one YAML section.
-
-        MINIO_ENDPOINT / MINIO_ACCESS_KEY / MINIO_SECRET_KEY env vars override
-        the config values so the same YAML works across local, Docker, and K8s.
-        """
-        backend = self.shared_cfg["storage"]["backend"].lower()
-        layer_cfg = self.shared_cfg["layers"][layer]
-
-        if backend == "local":
-            # Resolve now — JVM cwd is /tmp after Spark startup and won't follow
-            # Python's os.chdir() restoration.
-            return str(Path(layer_cfg["local_path"]).resolve()), None
-
-        if backend == "minio":
-            minio = self.shared_cfg["minio"]
-            return (
-                f"s3a://{layer_cfg['bucket']}/{layer_cfg['prefix']}",
-                {
-                    "endpoint": os.environ.get("MINIO_ENDPOINT", minio["endpoint"]),
-                    "access_key": os.environ.get("MINIO_ACCESS_KEY", minio["access_key"]),
-                    "secret_key": os.environ.get("MINIO_SECRET_KEY", minio["secret_key"]),
-                },
-            )
-
-        raise ValueError(
-            f"Unsupported storage backend: {backend!r} (expected 'local' or 'minio')"
-        )
-
-    def _build_spark(self, s3_config: dict | None = None) -> SparkSession:
-        # WSL2: JVM cannot call getcwd() on drvfs (/mnt/*) paths.
-        # Temporarily switch to /tmp so the JVM subprocess inherits a valid cwd,
-        # then restore Python's cwd after getOrCreate() returns.
-        _cwd = os.getcwd()
-        os.chdir("/tmp")
-        try:
-            spark = self._create_spark_session(s3_config)
-        finally:
-            os.chdir(_cwd)
-        return spark
-
-    def _create_spark_session(self, s3_config: dict | None = None) -> SparkSession:
+    def _create_spark_session(self, app_name: str) -> SparkSession:
+        Path("/tmp/spark-events").mkdir(parents=True, exist_ok=True)
         builder = (
-            SparkSession.builder
-            .master("local[*]")
-            .appName(self.PREFIX)
+            SparkSession.builder.master("local[*]")
+            .appName(app_name)
+            # Delta Lake extensions
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
             .config(
                 "spark.sql.catalog.spark_catalog",
                 "org.apache.spark.sql.delta.catalog.DeltaCatalog",
             )
-            .config("spark.sql.adaptive.enabled", "true")
-            .config("spark.sql.adaptive.skewJoin.enabled", "true")
-            # WSL: Java cannot resolve /mnt/d/... as its working dir; use /tmp instead.
-            .config("spark.local.dir", "/tmp/spark-local")
-            .config("spark.driver.host", "127.0.0.1")
+            # Minio / S3A
+            .config(
+                "spark.hadoop.fs.s3a.endpoint", self.shared_cfg["minio"]["endpoint"]
+            )
+            .config(
+                "spark.hadoop.fs.s3a.access.key", self.shared_cfg["minio"]["access_key"]
+            )
+            .config(
+                "spark.hadoop.fs.s3a.secret.key", self.shared_cfg["minio"]["secret_key"]
+            )
+            .config("spark.hadoop.fs.s3a.path.style.access", "true")
+            .config(
+                "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
+            )
+            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
+            .config("spark.jars.packages", ",".join(self.shared_cfg["packages"]))
+            # History Server event logging
+            .config("spark.eventLog.enabled", "true")
+            .config("spark.eventLog.dir", "file:///tmp/spark-events")
+            .config("spark.history.fs.logDirectory", "file:///tmp/spark-events")
+            .getOrCreate()
         )
+        return builder
 
-        s3a_endpoint = None
-        if s3_config:
-            # fs.s3a.endpoint wants host:port only — strip any http(s):// prefix.
-            s3a_endpoint = s3_config["endpoint"].removeprefix("https://").removeprefix("http://")
-            builder = (
-                builder
-                .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
-                .config("spark.hadoop.fs.s3a.endpoint", s3a_endpoint)
-                .config("spark.hadoop.fs.s3a.access.key", s3_config["access_key"])
-                .config("spark.hadoop.fs.s3a.secret.key", s3_config["secret_key"])
-                .config("spark.hadoop.fs.s3a.path.style.access", "true")
-                .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
-                .config(
-                    "spark.hadoop.fs.s3a.aws.credentials.provider",
-                    "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
-                )
-            )
+    def _resolve_s3_config(self, layer: str) -> tuple[Path, dict]:
+        """
+        Returns the output directory and S3 config for the given layer.
 
-        # configure_spark_with_delta_pip sets spark.jars for the Delta JARs.
-        # Append S3A JARs afterwards so both end up on the classpath.
-        # JARs live at /opt/spark-s3a/ — outside the /app/.venv volume mount.
-        builder = configure_spark_with_delta_pip(builder)
+        Args:
+            layer (str): The layer name (e.g., "bronze", "silver", "gold").
 
-        if s3_config:
-            _s3a_jars = (
-                "file:///opt/spark-s3a/hadoop-aws-3.3.4.jar,"
-                "file:///opt/spark-s3a/aws-java-sdk-bundle-1.12.262.jar"
-            )
-            _existing = builder._options.get("spark.jars", "")
-            builder = builder.config(
-                "spark.jars",
-                f"{_existing},{_s3a_jars}" if _existing else _s3a_jars,
-            )
-            self.logger.info("spark S3A → MinIO endpoint=%s", s3a_endpoint)
+        Returns:
+            tuple[Path, dict]: A tuple containing the output directory as a Path object
+                               and the S3 configuration as a dictionary.
+        """
+        if layer not in self.shared_cfg["layers"]:
+            raise ValueError(f"Layer '{layer}' not found in shared config.")
 
-        return builder.getOrCreate()
+        layer_config = self.shared_cfg["layers"][layer]
+        bucket_name = layer_config["bucket"]
+        folder_name = layer_config["prefix"]
+
+        # Construct the output directory path
+        output_dir = f"s3a://{bucket_name}/{folder_name}"
+
+        # Return the output directory and S3 config
+        return output_dir, {
+            "endpoint": self.shared_cfg["minio"]["endpoint"],
+            "access_key": self.shared_cfg["minio"]["access_key"],
+            "secret_key": self.shared_cfg["minio"]["secret_key"],
+        }
 
     def _generate_run_id(self) -> str:
         return f"{self.PREFIX}_{datetime.now():%Y%m%d_%H%M%S}"
-
-    def _load_config(self, config_file: str) -> dict:
-        path = Path(config_file)
-        if not path.exists():
-            raise FileNotFoundError(path)
-        with open(path) as f:
-            return yaml.safe_load(f)
 
     # ── logging helpers ───────────────────────────────────────────────────────
 

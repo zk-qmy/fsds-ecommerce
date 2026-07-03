@@ -178,8 +178,11 @@ fsds-ecommerce/
 - `customers` — customer_id, signup_ts, country, segment, marketing_opt_in
 - `products` — product_id, category, brand, base_price, is_active, created_ts
 - `orders` — order_id, customer_id, order_timestamp, status, shipping_city, shipping_method, coupon_code
-- `order_items` — order_item_id, order_id, product_id, quantity, unit_price, discount_amount
-- `payments` — payment_id, order_id, payment_timestamp, payment_method, amount, payment_status
+- `order_items` — order_item_id, order_id, product_id, quantity, unit_price, discount, line_total
+- `payments` - payment_id, order_id, payment_timestamp, amount, payment_method, payment_status
+
+Stream data:
+- `events` - event_id, event_type, event_timestamp, created_ts, customer_id, session_id, product_id, order_id, quantity, price
 
 **Gold schema: `gold_ecommerce`**
 - `dim_customer` (SCD2) — customer_key, customer_id (BK), signup_ts, segment, country, marketing_opt_in, valid_from_ts, valid_to_ts, is_current
