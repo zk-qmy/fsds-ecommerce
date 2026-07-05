@@ -221,3 +221,5 @@ __marimo__/
 coursework/
 # Generated CSV scratch files (parquet in outputs/offline/ is canonical)
 a_data_generator/outputs/*.csv
+# Temporary ignore
+b_schema_pipelines/delta-lake-data/

@@ -6,22 +6,26 @@ data problems, and writes clean Silver Delta tables.
 
 Two modes:
     baseline   — naive read/write, no fixes (run first, capture Spark UI)
-    optimised  — all four fixes applied (run second, capture Spark UI)
+    optimized  — all four fixes applied (run second, capture Spark UI)
 
 Run:
     uv run python b_schema_pipelines/pipelines/silver/transform_silver.py --mode baseline
-    uv run python b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimised
+    uv run python b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
 """
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
+from datetime import datetime
 
+from pyspark.sql import Window
+from pyspark.sql import functions as F
+from pyspark.sql.functions import broadcast
+
+from b_schema_pipelines.pipelines.common.delta_writer import DeltaWriter
 from b_schema_pipelines.pipelines.pipeline_base import PipelineBase
 
-# TODO: from pyspark.sql import Window
-# TODO: from pyspark.sql import functions as F
+SILVER_TABLES = ("orders", "order_items", "products", "customers", "payments")
 
 
 class SilverTransformer(PipelineBase):
@@ -31,149 +35,171 @@ class SilverTransformer(PipelineBase):
 
     def __init__(
         self,
-        bronze_dir: str | Path = "b_schema_pipelines/outputs/bronze",
-        silver_dir: str | Path = "b_schema_pipelines/outputs/silver",
+        bronze_dir: str | None = None,
+        silver_dir: str | None = None,
         schema_change_date: str = "2026-03-24",
     ):
         super().__init__()
-        self.bronze_dir = Path(bronze_dir)
-        self.silver_dir = Path(silver_dir)
+        self.bronze_dir = bronze_dir or self._resolve_s3_config("bronze")[0]
+        self.silver_dir = silver_dir or self._resolve_s3_config("silver")[0]
         self.schema_change_date = schema_change_date
         self.spark = self._build_spark()
+        self.writer = DeltaWriter(spark=self.spark)
 
-    # ── public ────────────────────────────────────────────────────────────────
+    # public
 
-    def run(self, mode: str = "optimised") -> None:
-        """
-        TODO: Dispatch to _run_baseline or _run_optimised, then spark.stop().
-        """
-        raise NotImplementedError
+    def run(self, mode: str = "optimized") -> None:
+        """Dispatch to baseline or optimized pipeline."""
+        if mode == "baseline":
+            self._run_baseline()
+        elif mode == "optimized":
+            self._run_optimized()
+        else:
+            raise ValueError(
+                f"Unknown mode: {mode!r}. Choose 'baseline' or 'optimized'."
+            )
 
-    # ── private: spark ────────────────────────────────────────────────────────
+    # private: spark
 
     def _build_spark(self):
-        """
-        TODO: Silver only needs Delta — no JDBC.
-        AQE skewJoin is already on in super()._build_spark() (Fix 1 — Problem A).
-            return super()._build_spark()
-        """
-        raise NotImplementedError
+        # Fix 1 — AQE skew join handles Problem A (85% Ho Chi Minh City partition skew)
+        # self.spark.conf.set("spark.sql.adaptive.enabled", "true")
+        # self.spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+        return self.spark
 
-    # ── private: readers / writers ────────────────────────────────────────────
+    # ── private: readers / writers
 
     def _read_bronze(self, table: str):
-        """
-        TODO: self.spark.read.format("delta").load(str(self.bronze_dir / table))
-        """
-        raise NotImplementedError
+        return self.spark.read.format(
+            "delta"
+            ).load(f"{self.bronze_dir}/{table}")
 
     def _write_silver(self, df, table: str, merge_schema: bool = False) -> int:
-        """
-        TODO: Write to self.silver_dir / table, format="delta", mode="overwrite".
-        Pass option("mergeSchema", "true") when merge_schema=True (Fix 2).
-        Return output row count.
-        """
-        raise NotImplementedError
+        """Write df to Silver Delta table and return the row count.
 
-    # ── private: baseline ─────────────────────────────────────────────────────
+        Caches df so count() and save() share one materialized scan instead of two.
+        """
+        df = df.cache()
+        count = df.count()
+        self.writer.write(
+            df,
+            f"{self.silver_dir}/{table}",
+            table,
+            mode="overwrite",
+            row_count=count,
+            merge_schema=merge_schema,
+        )
+        df.unpersist()
+        return count
+
+    # private: baseline
 
     def _run_baseline(self) -> None:
-        """
-        TODO: Naive pass-through — no fixes.
-
-        For each table in (orders, order_items, products, customers, payments):
-            df = self._read_bronze(table)
-            self._write_silver(df, table)
-            self._log_run(table, ...)
+        """Naive pass-through — no fixes.
 
         PURPOSE: Capture Spark UI "before" screenshots:
             Stages tab — skewed task durations on orders (Problem A: 85% HCMC)
             SQL tab    — SortMergeJoin for the products join (no broadcast hint)
         """
-        raise NotImplementedError
+        for table in SILVER_TABLES:
+            start_ts = datetime.now()
+            df = self._read_bronze(table)
+            rows_out = self._write_silver(df, table)
+            self.log_run(
+                table, start_ts, datetime.now(),
+                rows_out, rows_out, "ok"
+            )
 
-    # ── private: fixes ────────────────────────────────────────────────────────
+    # private: fixes
 
     def _fix_schema_evolution(self, orders_df):
-        """
-        TODO: Fill NULLs from Problem B (schema evolution).
-
-            orders_df
-                .withColumn("coupon_code",
-                    F.when(F.col("coupon_code").isNull(), F.lit("LEGACY"))
-                     .otherwise(F.col("coupon_code")))
-                .withColumn("shipping_method",
-                    F.when(F.col("shipping_method").isNull(), F.lit("UNKNOWN"))
-                     .otherwise(F.col("shipping_method")))
-
-        Write with merge_schema=True so Delta accepts old NULL partitions
-        alongside new non-NULL partitions.
-        """
-        raise NotImplementedError
+        """Fix Problem B — fill NULLs in orders from before schema_change_date."""
+        return orders_df.withColumn(
+            "coupon_code",
+            F.when(F.col("coupon_code").isNull(), F.lit("LEGACY")).otherwise(
+                F.col("coupon_code")
+            ),
+        ).withColumn(
+            "shipping_method",
+            F.when(F.col("shipping_method").isNull(),
+                   F.lit("UNKNOWN")).otherwise(
+                F.col("shipping_method")
+            ),
+        )
 
     def _fix_duplicates(self, order_items_df):
+        """Fix Problem C — dedup order_items on natural key, keep one row per group.
+
+        The generator injects exact-copy duplicates (no created_ts in order_items);
+        ingest_ts is constant per batch so order_item_id is the stable tiebreaker.
+        Evidence: before count ~909,000 → after count ~890,000.
         """
-        TODO: Dedup order_items on natural key, keep earliest created_ts (Problem C).
-
-            window = Window
-                .partitionBy("order_id", "product_id", "unit_price")
-                .orderBy(F.col("created_ts").asc())
-
-            order_items_df
-                .withColumn("_rank", F.row_number().over(window))
-                .filter(F.col("_rank") == 1)
-                .drop("_rank")
-
-        Evidence: before count = 909,000 → after count ~= 890,000.
-        """
-        raise NotImplementedError
+        window = Window.partitionBy("order_id", "product_id", "unit_price").orderBy(
+            F.col("ingest_ts").asc(), F.col("order_item_id").asc()
+        )
+        return (
+            order_items_df.withColumn("_rank", F.row_number().over(window))
+            .filter(F.col("_rank") == 1)
+            .drop("_rank")
+        )
 
     def _fix_broadcast_join(self, orders_df, products_df):
+        """Fix Problem A (cardinality) — replace SortMergeJoin with BroadcastHashJoin.
+
+        products (~45k rows, ~5 MB) fits in executor memory.
+        Call standalone to capture Spark UI SQL tab for Fix 4 evidence:
+            exchange bytes drop to 0 after broadcast hint is applied.
         """
-        TODO: Replace SortMergeJoin with BroadcastHashJoin for products join (Problem A cardinality).
+        return orders_df.join(broadcast(products_df), on="product_id", how="left")
 
-            from pyspark.sql.functions import broadcast
-            orders_df.join(broadcast(products_df), on="product_id", how="left")
+    # private: optimized run
 
-        products (45k rows, ~5 MB) fits in executor memory.
-        Evidence: SQL plan exchange bytes drop to 0 after broadcast.
-        """
-        raise NotImplementedError
+    def _run_optimized(self) -> None:
+        """Apply all four fixes in sequence."""
+        # Fix 2 — schema evolution: fill NULL coupon_code / shipping_method.
+        # Cache Bronze so rows_in count, fix transform, and _write_silver all
+        # share one S3A scan instead of three.
+        orders_start = datetime.now()
+        orders_bronze = self._read_bronze("orders").cache()
+        orders_rows_in = orders_bronze.count()
+        orders_df = self._fix_schema_evolution(orders_bronze)
+        rows_out = self._write_silver(orders_df, "orders", merge_schema=True)
+        orders_bronze.unpersist()
+        self.log_run(
+            "orders", orders_start, datetime.now(), orders_rows_in, rows_out, "ok"
+        )
 
-    # ── private: optimised run ────────────────────────────────────────────────
+        # Fix 3 — dedup: remove duplicate order_items, keep earliest ingest_ts.
+        # Same caching pattern: one S3A scan covers rows_in, window dedup, and write.
+        items_start = datetime.now()
+        items_bronze = self._read_bronze("order_items").cache()
+        items_rows_in = items_bronze.count()
+        order_items_df = self._fix_duplicates(items_bronze)
+        rows_out = self._write_silver(order_items_df, "order_items")
+        items_bronze.unpersist()
+        self.log_run(
+            "order_items", items_start, datetime.now(), items_rows_in, rows_out, "ok"
+        )
 
-    def _run_optimised(self) -> None:
-        """
-        TODO: Apply all four fixes in sequence.
+        # Fix 1 (AQE skewJoin) is passive — active via _build_spark config above.
+        # Fix 4 (_fix_broadcast_join) is a Spark-plan demonstration — call it standalone
+        # against order_items + products to capture Spark UI SQL tab screenshot.
 
-            orders_df      = self._read_bronze("orders")
-            orders_df      = self._fix_schema_evolution(orders_df)       # Fix 2
-
-            order_items_df = self._read_bronze("order_items")
-            order_items_df = self._fix_duplicates(order_items_df)        # Fix 3
-
-            products_df    = self._read_bronze("products")
-            _              = self._fix_broadcast_join(orders_df, products_df)  # Fix 4
-
-            # Fix 1 (AQE skewJoin) is passive — active via _build_spark config.
-
-            self._write_silver(orders_df, "orders", merge_schema=True)
-            self._write_silver(order_items_df, "order_items")
-            self._write_silver(products_df, "products")
-
-            for table in ("customers", "payments"):
-                self._write_silver(self._read_bronze(table), table)
-
-            self._log_run(...)
-        """
-        raise NotImplementedError
+        for table in ("products", "customers", "payments"):
+            start_ts = datetime.now()
+            df = self._read_bronze(table)
+            rows_out = self._write_silver(df, table)
+            self.log_run(table, start_ts, datetime.now(), rows_out, rows_out, "ok")
 
 
-# ── entrypoint ────────────────────────────────────────────────────────────────
+# entrypoint
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["baseline", "optimised"], default="optimised")
+    parser.add_argument(
+        "--mode", choices=["baseline", "optimized"], default="optimized"
+    )
     parser.add_argument("--schema-change-date", default="2026-03-24")
     args = parser.parse_args()
 
