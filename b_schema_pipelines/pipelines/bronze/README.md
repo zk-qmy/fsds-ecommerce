@@ -1,61 +1,54 @@
-# Bronze Ingestion Pipeline
+# Bronze → Silver Pipelines
 
-Reads raw source files from `a_data_generator/outputs/` and writes them as Delta Lake tables to the Bronze layer. No transformation — Bronze is a faithful copy of the source plus lineage columns (`ingest_ts`, `source_file`, `pipeline_run_id`).
+Reads raw source files from `a_data_generator/outputs/` and writes them as Delta Lake tables to the Bronze layer in MinIO. No transformation — Bronze is a faithful copy of the source plus three lineage columns: `ingest_ts`, `source_file`, `pipeline_run_id`.
 
 **Tables ingested:** `customers`, `products`, `orders`, `order_items`, `payments`, `events`
+
+---
+
+## Architecture
+
+```
+a_data_generator/outputs/
+  offline/  ← .parquet files (customers, products, orders, order_items, payments)
+  streaming/ ← events.json (NDJSON)
+        │
+        ▼  FileReader  (ns→us timestamp downcast for Parquet)
+        │
+        ▼  MetadataManager  (stamps ingest_ts, source_file, pipeline_run_id)
+        │
+        ▼  Quality gates  (volume, schema, null PK checks)
+        │
+        ▼  DeltaWriter  (common/delta_writer.py — append mode, mergeSchema=true)
+        │
+s3a://bronze-data/bronze/<table>/   ← Delta Lake on MinIO
+```
+
+`DeltaWriter` is shared with the Silver pipeline via `b_schema_pipelines/pipelines/common/delta_writer.py`.
 
 ---
 
 ## Prerequisites
 
 - WSL2 (Ubuntu) with Python 3.13
-- Data generated: `a_data_generator/outputs/offline/*.parquet` and `a_data_generator/outputs/streaming/events.json`
+- Data generated: `uv run python a_data_generator/generator.py`
 - Dependencies installed: `uv sync` from the repo root
+- MinIO running (see Step 1 below)
 
 ---
 
-## Running locally (writes to disk)
+## Running the pipeline
 
-`b_schema_pipelines/pipelines/pipeline_config.yaml` must have:
-
-```yaml
-storage:
-  backend: local
-```
-
-Then in WSL2 (use `python3` directly — `uv run` fails on `/mnt/d/` due to a Rust `getcwd()` issue):
+**Step 1 — Start**
 
 ```bash
-cd /mnt/d/fsds-ecommerce
-source .venv/bin/activate
-python3 b_schema_pipelines/pipelines/bronze/ingest_bronze.py
+docker compose -f infra/docker-compose.yml up -d
 ```
 
-Output is written to:
+Verify it is healthy: [http://localhost:9001](http://localhost:9001)
+Login: `minio_access_key` / `minio_secret_key`
 
-```
-b_schema_pipelines/delta_lake_data/bronze/
-├── customers/
-├── products/
-├── orders/
-├── order_items/
-├── payments/
-└── events/
-```
-
----
-
-## Running with MinIO (Docker)
-
-**Step 1 — Start MinIO**
-
-```bash
-docker compose -f infra/docker-compose.yml up -d minio
-```
-
-Verify it is healthy: [http://localhost:9001](http://localhost:9001) (login: `minio_access_key` / `minio_secret_key`)
-
-**Step 2 — Start the Spark History Server** (once, before running the pipeline)
+**Step 2 — Start the Spark History Server** (captures completed-job UI)
 
 ```bash
 cd /mnt/d/fsds-ecommerce
@@ -66,14 +59,18 @@ mkdir -p /tmp/spark-events
 $SPARK_HOME/sbin/start-history-server.sh
 ```
 
-If you see `HistoryServer running as process XXXX. Stop it first.` it is already running — skip this step.
+If you see `HistoryServer running as process XXXX. Stop it first.` — reset it:
+
+```bash
+$SPARK_HOME/sbin/stop-history-server.sh && $SPARK_HOME/sbin/start-history-server.sh
+```
 
 **Step 3 — Run the pipeline**
 
 ```bash
 cd /mnt/d/fsds-ecommerce
 source .venv/bin/activate
-python3 b_schema_pipelines/pipelines/bronze/ingest_bronze.py
+uv run python3 b_schema_pipelines/pipelines/bronze/ingest_bronze.py
 ```
 
 Output is written to `s3a://bronze-data/bronze/` on MinIO.
@@ -86,43 +83,116 @@ Output is written to `s3a://bronze-data/bronze/` on MinIO.
 | Spark History Server (completed jobs) | http://localhost:18080 | After the job finishes |
 | MinIO Console (Delta files) | http://localhost:9001 | Once MinIO is started |
 
-To stop the History Server when done:
-
-```bash
-$SPARK_HOME/sbin/stop-history-server.sh
-```
-
 ---
 
 ## Configuration reference
 
-Storage routing is shared across all pipelines — configured in one place:
+**`b_schema_pipelines/pipelines/pipeline_config.yaml`** — shared across all pipeline stages
 
-**`b_schema_pipelines/pipelines/pipeline_config.yaml`**
+| Key | Value | Description |
+|---|---|---|
+| `minio.endpoint` | `http://localhost:9000` | MinIO S3 API endpoint |
+| `minio.access_key` | `minio_access_key` | MinIO access key |
+| `minio.secret_key` | `minio_secret_key` | MinIO secret key |
+| `layers.bronze.bucket` | `bronze-data` | MinIO bucket for Bronze Delta tables |
+| `layers.bronze.prefix` | `bronze` | Key prefix inside the bucket |
 
-| Key | Description |
-|---|---|
-| `storage.backend` | `local` writes to disk; `minio` writes to MinIO via S3A |
-| `minio.endpoint` | MinIO endpoint — overridden by `MINIO_ENDPOINT` env var |
-| `minio.access_key` | MinIO access key — overridden by `MINIO_ACCESS_KEY` env var |
-| `minio.secret_key` | MinIO secret key — overridden by `MINIO_SECRET_KEY` env var |
-| `layers.bronze.local_path` | Local output path (used when `backend: local`) |
-| `layers.bronze.bucket` | MinIO bucket name (used when `backend: minio`) |
-| `layers.bronze.prefix` | Key prefix inside the bucket |
-
-Bronze-specific settings (quality rules, expected columns, primary keys) are in `bronze_config.yaml`.
+**`bronze_config.yaml`** — Bronze-specific quality rules (expected columns, primary keys per table)
 
 ---
 
 ## Expected output
 
+One JSON line per table is printed to stdout on success, plus structured log entries:
+
 ```
-[customers] phase=start
-[customers] quality gates passed  rows=120000
-[customers] delta_commit  version=0  rows=120000  files=...  bytes=...  duration_ms=...
-[customers] phase=end  status=ok  rows_in=120000  rows_out=120000  duration_s=...
-...
-[events] phase=end  status=ok  rows_in=...  rows_out=...  duration_s=...
+=== [0] Waiting for MinIO ===
+  MinIO is ready.
+
+=== [1] Creating buckets ===
+
+=== [2] Bronze — Delta table → MinIO ===
+{"status": "success", "table": "customers",    "rows": 120000}
+{"status": "success", "table": "products",     "rows": 45000}
+{"status": "success", "table": "orders",       "rows": 360000}
+{"status": "success", "table": "order_items",  "rows": 900000}
+{"status": "success", "table": "payments",     "rows": 360000}
+{"status": "success", "table": "events",       "rows": ...}
 ```
 
-Logs are written to `logs/bronze/<run_id>.log`.
+Full structured logs (run_id, timings, Delta commit metrics) are written to `logs/bronze/<run_id>.log`.
+
+---
+
+## Silver Transformation Pipeline
+
+Reads Bronze Delta tables from MinIO, applies four targeted fixes for the injected data problems, and writes clean Silver Delta tables back to MinIO.
+
+**Run Bronze first** — Silver reads from `s3a://bronze-data/bronze/`.
+
+### Two modes
+
+Always run **baseline first**, then **optimized**. The Spark UI screenshots from both runs are grading evidence.
+
+| Mode | What it does |
+|---|---|
+| `baseline` | Raw pass-through — no fixes. Captures Spark UI "before" (skewed tasks, SortMergeJoin) |
+| `optimized` | All four fixes applied. Captures Spark UI "after" (balanced tasks, BroadcastHashJoin) |
+
+### Fixes applied in optimized mode
+
+| Fix | Problem | Change |
+|---|---|---|
+| 1 — AQE skewJoin | A: 85% Ho Chi Minh City | Session config — Spark splits skewed partitions at runtime |
+| 2 — NULL fill | B: schema evolution | `coupon_code` NULL → `LEGACY`, `shipping_method` NULL → `UNKNOWN` |
+| 3 — Dedup | C: 2% duplicate rows | Keep earliest `created_ts` per `(order_id, product_id, unit_price)` |
+| 4 — Broadcast join | A: products join | `SortMergeJoin` → `BroadcastHashJoin` (standalone demo, see note below) |
+
+> **Fix 4 note:** `_fix_broadcast_join` is a standalone demonstration method — call it manually after the optimized run to capture the Spark UI SQL tab screenshot showing exchange bytes drop to 0.
+
+### Running Silver
+
+```bash
+cd /mnt/d/fsds-ecommerce
+source .venv/bin/activate
+
+# Step 1 — run baseline (capture Spark UI before screenshots)
+uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode baseline
+
+# Step 2 — run optimized (capture Spark UI after screenshots)
+uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
+```
+
+Optional — override the schema change date (default `2026-03-24`):
+
+```bash
+uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py \
+    --mode optimized \
+    --schema-change-date 2026-03-01
+```
+
+Output is written to `s3a://silver-data/silver/` on MinIO.
+
+### Expected output (optimized)
+
+```
+{"status": "success", "table": "orders",      "rows": 360000}   # rows_in > rows_out not logged here; see .log
+{"status": "success", "table": "order_items", "rows": ~890000}  # ~2% deduped from ~909000
+{"status": "success", "table": "products",    "rows": 45000}
+{"status": "success", "table": "customers",   "rows": 120000}
+{"status": "success", "table": "payments",    "rows": 360000}
+```
+
+Full structured logs are written to `logs/silver/<run_id>.log`.
+
+# Delete Minio bucket
+```bash
+# Delete all objects + the bucket bronze-data itself
+docker exec fsds-minio mc rb --force local/bronze-data
+```
+
+# Stop Spark history server
+```bash
+$SPARK_HOME/sbin/stop-history-server.sh
+rm -rf /tmp/spark-events/*
+``` 

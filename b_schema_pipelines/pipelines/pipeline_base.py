@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -53,31 +52,42 @@ class PipelineBase(ABC):
             SparkSession.builder.master("local[*]")
             .appName(app_name)
             # Delta Lake extensions
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config("spark.sql.extensions",
+                    "io.delta.sql.DeltaSparkSessionExtension")
             .config(
                 "spark.sql.catalog.spark_catalog",
                 "org.apache.spark.sql.delta.catalog.DeltaCatalog",
             )
             # Minio / S3A
             .config(
-                "spark.hadoop.fs.s3a.endpoint", self.shared_cfg["minio"]["endpoint"]
+                "spark.hadoop.fs.s3a.endpoint",
+                self.shared_cfg["minio"]["endpoint"]
             )
             .config(
-                "spark.hadoop.fs.s3a.access.key", self.shared_cfg["minio"]["access_key"]
+                "spark.hadoop.fs.s3a.access.key",
+                self.shared_cfg["minio"]["access_key"]
             )
             .config(
-                "spark.hadoop.fs.s3a.secret.key", self.shared_cfg["minio"]["secret_key"]
+                "spark.hadoop.fs.s3a.secret.key",
+                self.shared_cfg["minio"]["secret_key"]
             )
             .config("spark.hadoop.fs.s3a.path.style.access", "true")
             .config(
-                "spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"
+                "spark.hadoop.fs.s3a.impl",
+                "org.apache.hadoop.fs.s3a.S3AFileSystem"
             )
             .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
-            .config("spark.jars.packages", ",".join(self.shared_cfg["packages"]))
+            # Increase connection pool for concurrent parallel reads (16+ parquet files)
+            .config("spark.hadoop.fs.s3a.connection.maximum", "200")
+            .config("spark.hadoop.fs.s3a.connection.timeout", "200000")
+            .config("spark.hadoop.fs.s3a.socket.timeout", "200000")
+            .config("spark.jars.packages",
+                    ",".join(self.shared_cfg["packages"]))
             # History Server event logging
             .config("spark.eventLog.enabled", "true")
             .config("spark.eventLog.dir", "file:///tmp/spark-events")
-            .config("spark.history.fs.logDirectory", "file:///tmp/spark-events")
+            .config("spark.history.fs.logDirectory",
+                    "file:///tmp/spark-events")
             .getOrCreate()
         )
         return builder
@@ -90,8 +100,8 @@ class PipelineBase(ABC):
             layer (str): The layer name (e.g., "bronze", "silver", "gold").
 
         Returns:
-            tuple[Path, dict]: A tuple containing the output directory as a Path object
-                               and the S3 configuration as a dictionary.
+            tuple[Path, dict]: A tuple containing the output directory
+            as a Path object and the S3 configuration as a dictionary.
         """
         if layer not in self.shared_cfg["layers"]:
             raise ValueError(f"Layer '{layer}' not found in shared config.")
@@ -113,7 +123,7 @@ class PipelineBase(ABC):
     def _generate_run_id(self) -> str:
         return f"{self.PREFIX}_{datetime.now():%Y%m%d_%H%M%S}"
 
-    # ── logging helpers ───────────────────────────────────────────────────────
+    # logging helpers
 
     def log_table_start(self, table: str, source: str = "") -> None:
         """Log the beginning of a per-table processing step."""

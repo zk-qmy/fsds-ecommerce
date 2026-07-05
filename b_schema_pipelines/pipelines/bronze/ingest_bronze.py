@@ -14,32 +14,37 @@ Run:
 
 from __future__ import annotations
 
-from datetime import datetime
-from pathlib import Path
+import json
+import sys
 import time
 import urllib.request
-import sys
-from delta.tables import DeltaTable
+from datetime import datetime
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 from pyspark.sql import functions as F
 
-from config.logging import setup_logger
+from b_schema_pipelines.pipelines.common.delta_writer import DeltaWriter
 from b_schema_pipelines.pipelines.pipeline_base import PipelineBase
+from config.logging import setup_logger
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from minio_client import MinioClient  # noqa: E402  (after sys.path insert)
+from utils.config import load_config   # noqa: E402
+
 OFFLINE_TABLES = ["customers", "products", "orders", "order_items", "payments"]
 
 
 class FileReader:
-    """Reads raw Parquet (offline tables) and NDJSON (events) from the source directory."""
+    """Reads raw Parquet (offline tables) and NDJSON (events)."""
 
     def __init__(self, spark) -> None:
         self.spark = spark
         self.logger = setup_logger(name="FileReader", filename="FileReader.log")
 
     def read_parquet(self, path: str):
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
         self.logger.info("reading parquet: %s", path)
         table = pq.read_table(path)
         # PySpark rejects TIMESTAMP(NANOS) in Parquet (pandas default); downcast ns → us.
@@ -70,14 +75,12 @@ class MetadataManager:
 
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
-        self.logger = setup_logger(
-            name="MetadataManager", filename="MetadataManager.log"
-        )
+        self.logger = setup_logger(name="MetadataManager", filename="MetadataManager.log")
 
     def add_processing_metadata(self, df, source_file: str):
         """Append ingest_ts, source_file, pipeline_run_id to every row."""
         self.logger.info(
-            "adding processing metadata: source_file=%s  pipeline_run_id=%s",
+            "adding metadata: source_file=%s  pipeline_run_id=%s",
             source_file,
             self.run_id,
         )
@@ -88,101 +91,24 @@ class MetadataManager:
         )
 
 
-class DeltaWriter:
-    """Writes DataFrames to Delta Lake using PySpark's Delta connector.
-
-    All metadata reads (table_exists, history, version) go through the same
-    SparkSession, so S3A credentials configured in _create_spark_session() cover both
-    reads and writes uniformly.
-    """
-
-    def __init__(self, spark) -> None:
-        self.spark = spark
-        self.logger = setup_logger(name="DeltaWriter", filename="DeltaWriter.log")
-
-    def write(self, df, output_path: str, table: str, mode: str = "overwrite", row_count: int = 0) -> int:
-        """Append df to a Delta table. Logs before/after state and commit metrics.
-
-        Returns the number of rows written.
-        """
-        if self.table_exists(output_path):
-            existing = self.load(output_path)
-            self.logger.info(
-                "[%s] existing table detected  version=%d",
-                table,
-                self.version(existing),
-            )
-
-        t0 = datetime.now()
-        rows_to_write = row_count
-        self.logger.info(
-            "[%s] Writing %d rows to %s", table, rows_to_write, output_path
-        )
-        try:
-            (
-                df.write.format("delta")
-                .mode(mode)
-                .option("mergeSchema", "true")
-                .save(output_path)
-            )
-        except Exception as e:
-            self.logger.error("[%s] Error writing to Delta table: %s", table, str(e))
-            raise
-        duration_ms = round((datetime.now() - t0).total_seconds() * 1000)
-
-        dt = self.load(output_path)
-        hist = self.history(dt)
-        metrics = (hist[0].get("operationMetrics") or {}) if hist else {}
-
-        self.logger.info(
-            "[%s] delta_commit  version=%d  rows=%d  files=%s  bytes=%s  duration_ms=%d",
-            table,
-            self.version(dt),
-            rows_to_write,
-            metrics.get("numFiles", "?"),
-            metrics.get("numOutputBytes", "?"),
-            duration_ms,
-        )
-        return rows_to_write
-
-    def table_exists(self, output_path: str) -> bool:
-        try:
-            return DeltaTable.isDeltaTable(self.spark, output_path)
-        except Exception:
-            self.logger.info("no existing Delta table at %s", output_path)
-            return False
-
-    def load(self, output_path: str) -> DeltaTable:
-        return DeltaTable.forPath(self.spark, output_path)
-
-    def history(self, dt: DeltaTable) -> list[dict]:
-        return [row.asDict() for row in dt.history().collect()]
-
-    def version(self, dt: DeltaTable) -> int:
-        rows = dt.history(1).collect()
-        return rows[0]["version"] if rows else -1
-
-    def schema(self, dt: DeltaTable):
-        return dt.toDF().schema
-
-    def optimize(self, output_path: str) -> None:
-        """Compact small files in the Delta table."""
-        self.load(output_path).optimize().executeCompaction()
-
-
 class BronzeIngester(PipelineBase):
-    """Ingests raw source files into the Bronze Delta Lake layer.
-
-    Reads each raw dataset, enriches rows with ingestion metadata,
-    runs quality gates, and writes to Delta tables in the Bronze layer.
-    """
+    """Ingests raw source files into the Bronze Delta Lake layer."""
 
     PREFIX = "bronze"
 
-    def __init__(self, source_dir: str | Path = "a_data_generator/outputs") -> None:
+    def __init__(
+        self,
+        source_dir: str | Path = "a_data_generator/outputs",
+        output_dir: str | Path | None = None,
+    ) -> None:
         super().__init__(config_file=Path(__file__).parent / "bronze_config.yaml")
         self.source_dir = Path(source_dir).resolve()
-        self.output_dir, _ = self._resolve_s3_config("bronze")
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+        else:
+            s3_path, _ = self._resolve_s3_config("bronze")
+            self.output_dir = s3_path          # string — S3A path
+        self.spark = self._build_spark()
         self.reader = FileReader(spark=self.spark)
         self.meta = MetadataManager(run_id=self.run_id)
         self.writer = DeltaWriter(spark=self.spark)
@@ -200,20 +126,38 @@ class BronzeIngester(PipelineBase):
     def run(self) -> None:
         """Ingest all offline tables then the event stream."""
         for table in OFFLINE_TABLES:
-            self._ingest_table(
-                table,
-                str(self.source_dir / "offline" / f"{table}.parquet"),
-                self.reader.read_parquet,
-            )
-        self._ingest_table(
-            "events",
-            str(self.source_dir / "streaming" / "events.json"),
-            self.reader.read_json,
-        )
+            self._ingest_offline_table(table)
+        self._ingest_events()
+        self.spark.stop()
+
+    def _build_spark(self):
+        """Hook for injecting a test SparkSession via patch.object."""
+        return self.spark
+
+    def _add_ingest_metadata(self, df, source_file: str):
+        """Stamp ingest_ts, source_file, pipeline_run_id onto every row."""
+        return self.meta.add_processing_metadata(df, source_file)
+
+    def _ingest_offline_table(self, table: str) -> None:
+        """Ingest one offline Parquet table into Bronze Delta."""
+        source_file = str(self.source_dir / "offline" / f"{table}.parquet")
+        self._ingest(table, source_file, self.reader.read_parquet)
+
+    def _ingest_events(self) -> None:
+        """Ingest the streaming events NDJSON file into Bronze Delta."""
+        source_file = str(self.source_dir / "streaming" / "events.json")
+        self._ingest("events", source_file, self.reader.read_json)
 
     # ── private ───────────────────────────────────────────────────────────────
 
-    def _ingest_table(self, table: str, source_file: str, read_fn) -> None:
+    def _table_path(self, table: str) -> str:
+        """Build the output path for a table, handling both Path and S3A string."""
+        if isinstance(self.output_dir, Path):
+            return str(self.output_dir / table)
+        return f"{self.output_dir}/{table}"
+
+    def _ingest(self, table: str, source_file: str, read_fn) -> None:
+        """Core ingestion logic shared by offline tables and events."""
         start_ts = datetime.now()
         input_rows = 0
         try:
@@ -223,22 +167,24 @@ class BronzeIngester(PipelineBase):
             df = read_fn(source_file)
             df.cache()
             input_rows = df.count()
-            rows_written = self._ingest_dataset(df, source_file, table, input_rows)
-            self.log_run(
-                table, start_ts, datetime.now(), input_rows, rows_written, "ok"
+            df = self._add_ingest_metadata(df, source_file)
+            self._check_quality(df, table, input_rows)
+            rows_written = self.writer.write(
+                df,
+                self._table_path(table),
+                table,
+                mode="append",
+                row_count=input_rows,
             )
+            df.unpersist()
+            print(json.dumps({"status": "success", "table": table, "rows": rows_written}))
+            self.log_run(table, start_ts, datetime.now(), input_rows, rows_written, "ok")
         except Exception as exc:
-            self.log_run(
-                table, start_ts, datetime.now(), input_rows, 0, "error", str(exc)
-            )
+            self.log_run(table, start_ts, datetime.now(), input_rows, 0, "error", str(exc))
             raise
 
     def _check_quality(self, df, table: str, row_count: int) -> None:
-        """Run Bronze quality gates: non-empty volume, schema presence, PK null-free.
-
-        Raises ValueError listing all failures so the ingestion job is halted
-        and the error surfaces in Airflow / log_run as status='error'.
-        """
+        """Quality gates: non-empty volume, schema presence, PK null-free."""
         self.logger.info("[%s] running quality gates", table)
         errors: list[str] = []
 
@@ -263,17 +209,8 @@ class BronzeIngester(PipelineBase):
 
         self.logger.info("[%s] quality gates passed  rows=%d", table, row_count)
 
-    def _ingest_dataset(self, df, source_file: str, table: str, row_count: int) -> int:
-        """Stamp metadata, run quality gates, write to Delta Lake. Returns rows written."""
-        self.logger.info("[%s] ingesting dataset from %s", table, source_file)
-        df = self.meta.add_processing_metadata(df, source_file)
-        self._check_quality(df, table, row_count)
-        output_path = f"{self.output_dir}/{table}"
-        self.logger.info("[%s] writing to Delta Lake at %s", table, output_path)
-        rows_written = self.writer.write(df, output_path, table, row_count=row_count)
-        df.unpersist()
-        return rows_written
 
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def wait_for_minio(retries: int = 15, delay: int = 2) -> None:
     url = "http://localhost:9000/minio/health/live"
@@ -290,14 +227,11 @@ def wait_for_minio(retries: int = 15, delay: int = 2) -> None:
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
 
-
 def main() -> None:
     print("=== [0] Waiting for MinIO ===")
     wait_for_minio()
 
     print("\n=== [1] Creating buckets ===")
-    from minio_client import MinioClient
-    from utils.config import load_config
     minio_client = MinioClient()
     cfg = load_config("b_schema_pipelines/pipelines/pipeline_config.yaml")
     buckets = [layer["bucket"] for layer in cfg["layers"].values()]
