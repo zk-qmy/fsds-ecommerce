@@ -391,7 +391,8 @@ class DataGenerator:
         - product_id: foreign key to products
         - quantity: random integer between 1 and 10
         - unit_price: product's base_price at the time of order (considering price changes)
-        - discount_amount: random discount between 0 and 30% of unit_price
+        - discount: random discount between 0 and 30% of unit_price
+        - line_total: (unit_price * quantity) - discount, added later by _generate_payments
         """
         orders_df = self._to_df(orders)
         products_df = self._to_df(products)

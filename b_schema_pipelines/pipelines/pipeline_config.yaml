@@ -2,11 +2,19 @@ packages:
   - org.apache.hadoop:hadoop-aws:3.4.2
   - com.amazonaws:aws-java-sdk-bundle:1.12.367
   - io.delta:delta-spark_2.13:4.1.0
+  - org.postgresql:postgresql:42.7.4
 
 minio:
   endpoint: http://localhost:9000
   access_key: minio_access_key
   secret_key: minio_secret_key
+
+postgres:
+  host: localhost
+  port: 5432
+  db: fsds
+  user: fsds
+  password: fsds
 
 layers:
   bronze:

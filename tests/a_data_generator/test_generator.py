@@ -102,7 +102,7 @@ EXPECTED_COLUMNS = {
     "orders":      {"order_id", "customer_id", "order_timestamp", "status",
                     "shipping_city", "shipping_method", "coupon_code"},
     "order_items": {"order_item_id", "order_id", "product_id", "quantity",
-                    "unit_price", "discount"},
+                    "unit_price", "discount", "line_total"},
     "payments":    {"payment_id", "order_id", "payment_timestamp",
                     "payment_method", "amount", "payment_status"},
 }
