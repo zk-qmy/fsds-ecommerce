@@ -8,6 +8,13 @@ Sample DataFrames are function-scoped so each test gets a clean copy.
 from __future__ import annotations
 
 import datetime
+import socketserver
+import sys
+
+# PySpark 4.x unconditionally references UnixStreamServer, which doesn't exist
+# on Windows. Stub it out before any pyspark import so the module loads.
+if sys.platform == "win32" and not hasattr(socketserver, "UnixStreamServer"):
+    socketserver.UnixStreamServer = socketserver.TCPServer  # type: ignore[attr-defined]
 from pathlib import Path
 import sys
 

@@ -1,58 +1,75 @@
 """
 Tests for SilverTransformer.
 
-All pipeline methods currently raise NotImplementedError — tests are marked
-xfail(strict=True). Remove the xfail marker once the method is implemented;
-the test body and assertions are ready.
-
 Transformation logic is tested on in-memory DataFrames — no Delta I/O.
-Delta reads/writes are mocked.
+Delta reads/writes and log_run are mocked so tests run without MinIO/Spark cluster.
 """
 
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-sys.path.append(str(Path(__file__).resolve().parents[2]))
-
-from b_schema_pipelines.pipelines.silver.transform_silver import SilverTransformer
+from b_schema_pipelines.pipelines.silver.transform_silver import (
+    SilverTransformer,
+    main,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def transformer(spark):
-    """SilverTransformer with Spark injected and I/O methods mocked."""
-    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
-        t = SilverTransformer()
-    # Stub out Delta I/O so tests focus on transform logic
-    t._read_bronze  = MagicMock()
+    """SilverTransformer with all I/O bypassed — only transform logic is live.
+
+    Uses object.__new__ to skip __init__ entirely (avoids MinIO/Spark startup).
+    Sets only the attributes that the transform methods actually read.
+    """
+    t = object.__new__(SilverTransformer)
+    t.spark = spark
+    t.schema_change_date = "2026-03-24"
+    t.run_id = "test_run"
+    t.logger = MagicMock()
+    t.log_run = MagicMock()  # avoids json.dumps(entry) with MagicMock row counts
+    t.writer = MagicMock()
+    t._read_bronze = MagicMock()
     t._write_silver = MagicMock(side_effect=lambda df, *a, **kw: df.count())
     return t
 
 
+@pytest.fixture
+def sample_products(spark):
+    """Products used to test the Fix 4 broadcast join.
+
+    Only P001/P002 are present — P003 (referenced by sample_order_items)
+    is deliberately missing so left-join behaviour can be verified.
+    """
+    rows = [
+        ("P001", "electronics", "Samsung", 999.0, True),
+        ("P002", "fashion",     "Zara",    59.9,  True),
+    ]
+    return spark.createDataFrame(
+        rows, ["product_id", "category", "brand", "base_price", "is_active"]
+    )
+
+
 # ── 1. _fix_schema_evolution (Problem B) ─────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_fix_schema_evolution_fills_null_coupon_code(transformer, sample_orders):
     result = transformer._fix_schema_evolution(sample_orders)
     null_count = result.filter(result["coupon_code"].isNull()).count()
     assert null_count == 0, "coupon_code must have no NULLs after Silver fix"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_fix_schema_evolution_fills_null_shipping_method(transformer, sample_orders):
     result = transformer._fix_schema_evolution(sample_orders)
     null_count = result.filter(result["shipping_method"].isNull()).count()
     assert null_count == 0, "shipping_method must have no NULLs after Silver fix"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 @pytest.mark.parametrize("col,expected_fill", [
     ("coupon_code",     "LEGACY"),
     ("shipping_method", "UNKNOWN"),
@@ -60,22 +77,22 @@ def test_fix_schema_evolution_fills_null_shipping_method(transformer, sample_ord
 def test_fix_schema_evolution_fill_values(col, expected_fill, transformer, sample_orders):
     result = transformer._fix_schema_evolution(sample_orders)
     rows = result.collect()
-    # Pre-schema-change orders (O001, O002, O003) had NULL — verify fill value
+    # O001–O003 had NULL before schema_change_date — verify fill value
     pre_change = [r for r in rows if r["order_id"] in ("O001", "O002", "O003")]
     for row in pre_change:
-        assert row[col] == expected_fill, f"Expected '{expected_fill}' for NULL {col}, got {row[col]!r}"
+        assert row[col] == expected_fill, (
+            f"Expected '{expected_fill}' for NULL {col}, got {row[col]!r}"
+        )
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_fix_schema_evolution_preserves_non_null_values(transformer, sample_orders):
     result = transformer._fix_schema_evolution(sample_orders)
     rows = {r["order_id"]: r for r in result.collect()}
-    # O004 had coupon_code='PROMO10' and shipping_method='express' — must not be overwritten
-    assert rows["O004"]["coupon_code"]    == "PROMO10"
+    # O004 already had real values — must not be overwritten
+    assert rows["O004"]["coupon_code"]     == "PROMO10"
     assert rows["O004"]["shipping_method"] == "express"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_fix_schema_evolution_row_count_unchanged(transformer, sample_orders):
     result = transformer._fix_schema_evolution(sample_orders)
     assert result.count() == sample_orders.count()
@@ -83,25 +100,22 @@ def test_fix_schema_evolution_row_count_unchanged(transformer, sample_orders):
 
 # ── 2. _fix_duplicates (Problem C) ───────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_fix_duplicates_reduces_row_count(transformer, sample_order_items):
     result = transformer._fix_duplicates(sample_order_items)
     # sample_order_items has 5 rows with 1 duplicate → expect 4 rows
     assert result.count() == 4
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
-def test_fix_duplicates_keeps_earliest_created_ts(transformer, sample_order_items):
+def test_fix_duplicates_keeps_earliest_ingest_ts(transformer, sample_order_items):
     result = transformer._fix_duplicates(sample_order_items)
     rows = {r["order_item_id"]: r for r in result.collect()}
-    # OI001 exists twice — earliest created_ts is 10:00, not 10:05
-    assert rows["OI001"]["created_ts"] == datetime.datetime(2026, 2, 1, 10, 0)
+    # OI001 exists twice — earliest ingest_ts is 10:00, not 10:05
+    assert rows["OI001"]["ingest_ts"] == datetime.datetime(2026, 2, 1, 10, 0)
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_fix_duplicates_no_duplicate_natural_keys(transformer, sample_order_items):
-    result = transformer._fix_duplicates(sample_order_items)
     from pyspark.sql import functions as F
+    result = transformer._fix_duplicates(sample_order_items)
     dupes = (
         result
         .groupBy("order_id", "product_id", "unit_price")
@@ -111,11 +125,11 @@ def test_fix_duplicates_no_duplicate_natural_keys(transformer, sample_order_item
     assert dupes.count() == 0, "Duplicate natural keys remain after dedup"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 @pytest.mark.parametrize("order_id,product_id,unit_price,expected_rows", [
     ("O001", "P001", 10.0, 1),   # duplicated — deduped to 1
     ("O001", "P002", 25.0, 1),   # unique — unchanged
     ("O002", "P003", 15.0, 1),   # unique — unchanged
+    ("O003", "P001", 10.0, 1),   # same product as OI001 but different order_id — kept
 ])
 def test_fix_duplicates_per_natural_key(
     order_id, product_id, unit_price, expected_rows, transformer, sample_order_items
@@ -136,7 +150,6 @@ def test_fix_duplicates_per_natural_key(
 
 # ── 3. _run_baseline ─────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_run_baseline_calls_read_for_all_tables(transformer):
     transformer.run(mode="baseline")
     call_args = [c.args[0] for c in transformer._read_bronze.call_args_list]
@@ -144,10 +157,11 @@ def test_run_baseline_calls_read_for_all_tables(transformer):
         assert table in call_args, f"_read_bronze not called for {table}"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_run_baseline_no_schema_evolution_fix(transformer, sample_orders):
     """Baseline mode must NOT apply NULL fills — raw data passes through."""
-    transformer._read_bronze.side_effect = lambda t: sample_orders if t == "orders" else MagicMock()
+    transformer._read_bronze.side_effect = (
+        lambda t: sample_orders if t == "orders" else MagicMock()
+    )
     transformer.run(mode="baseline")
 
     written_df = transformer._write_silver.call_args_list[0].args[0]
@@ -155,19 +169,16 @@ def test_run_baseline_no_schema_evolution_fix(transformer, sample_orders):
     assert null_count > 0, "Baseline must preserve NULLs (no transformation applied)"
 
 
-# ── 4. _run_optimised ────────────────────────────────────────────────────────
+# ── 4. _run_optimized ────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
-def test_run_optimised_applies_schema_fix(transformer, spark, sample_orders, sample_order_items):
-    from pyspark.sql import functions as F
-
+def test_run_optimized_applies_schema_fix(transformer, spark, sample_orders, sample_order_items):
     def mock_read(table):
         if table == "orders":      return sample_orders
         if table == "order_items": return sample_order_items
         return spark.createDataFrame([("x",)], ["id"])
 
     transformer._read_bronze.side_effect = mock_read
-    transformer.run(mode="optimised")
+    transformer.run(mode="optimized")
 
     orders_written = next(
         c.args[0] for c in transformer._write_silver.call_args_list
@@ -177,15 +188,14 @@ def test_run_optimised_applies_schema_fix(transformer, spark, sample_orders, sam
     assert null_count == 0
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
-def test_run_optimised_applies_dedup(transformer, spark, sample_orders, sample_order_items):
+def test_run_optimized_applies_dedup(transformer, spark, sample_orders, sample_order_items):
     def mock_read(table):
         if table == "orders":      return sample_orders
         if table == "order_items": return sample_order_items
         return spark.createDataFrame([("x",)], ["id"])
 
     transformer._read_bronze.side_effect = mock_read
-    transformer.run(mode="optimised")
+    transformer.run(mode="optimized")
 
     items_written = next(
         c.args[0] for c in transformer._write_silver.call_args_list
@@ -194,20 +204,257 @@ def test_run_optimised_applies_dedup(transformer, spark, sample_orders, sample_o
     assert items_written.count() < sample_order_items.count()
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_run_invalid_mode_raises(transformer):
-    with pytest.raises((ValueError, NotImplementedError)):
+    with pytest.raises(ValueError):
         transformer.run(mode="invalid_mode")
 
 
 # ── 5. _build_spark (Silver) ─────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
-def test_silver_build_spark_returns_session():
-    with patch("b_schema_pipelines.pipelines.silver.transform_silver.configure_spark_with_delta_pip"):
-        t = SilverTransformer.__new__(SilverTransformer)
-        PipelineBase = t.__class__.__bases__[0]
-        super_spark = MagicMock()
-        with patch.object(PipelineBase, "_build_spark", return_value=super_spark):
-            result = t._build_spark()
-    assert result is not None
+def test_silver_build_spark_returns_spark_session(transformer):
+    """_build_spark is a passthrough — AQE config is applied via SparkConf, not here."""
+    assert transformer._build_spark() is transformer.spark
+
+
+# ── 6. _fix_broadcast_join (Fix 4 — Problem A cardinality) ───────────────────
+
+def test_fix_broadcast_join_adds_product_columns(
+    transformer, sample_order_items, sample_products
+):
+    result = transformer._fix_broadcast_join(sample_order_items, sample_products)
+    assert "category" in result.columns
+    assert "brand" in result.columns
+
+
+def test_fix_broadcast_join_is_left_join_preserves_row_count(
+    transformer, sample_order_items, sample_products
+):
+    result = transformer._fix_broadcast_join(sample_order_items, sample_products)
+    assert result.count() == sample_order_items.count()
+
+
+def test_fix_broadcast_join_keeps_unmatched_rows_with_null_product_cols(
+    transformer, sample_order_items, sample_products
+):
+    """P003 isn't in sample_products — a left join must keep the row with NULLs."""
+    result = transformer._fix_broadcast_join(sample_order_items, sample_products)
+    unmatched = result.filter(result["product_id"] == "P003").collect()
+    assert len(unmatched) == 1
+    assert unmatched[0]["category"] is None
+
+
+def test_fix_broadcast_join_matched_rows_get_product_attrs(
+    transformer, sample_order_items, sample_products
+):
+    result = transformer._fix_broadcast_join(sample_order_items, sample_products)
+    matched = result.filter(result["product_id"] == "P002").collect()
+    assert matched[0]["category"] == "fashion"
+    assert matched[0]["brand"] == "Zara"
+
+
+def test_fix_broadcast_join_uses_broadcast_hash_join_physical_plan(
+    transformer, sample_order_items, sample_products, capsys
+):
+    """Confirms the broadcast() hint actually changes the physical join strategy."""
+    result = transformer._fix_broadcast_join(sample_order_items, sample_products)
+    result.explain(mode="simple")
+    plan = capsys.readouterr().out
+    assert "BroadcastHashJoin" in plan
+
+
+# ── 7. _read_bronze ───────────────────────────────────────────────────────────
+
+def test_read_bronze_reads_delta_format_from_correct_path():
+    t = object.__new__(SilverTransformer)
+    t.bronze_dir = "s3a://bronze-data/bronze"
+    t.spark = MagicMock()
+
+    t._read_bronze("orders")
+
+    t.spark.read.format.assert_called_once_with("delta")
+    t.spark.read.format.return_value.load.assert_called_once_with(
+        "s3a://bronze-data/bronze/orders"
+    )
+
+
+# ── 8. _write_silver ──────────────────────────────────────────────────────────
+
+def test_write_silver_returns_row_count(spark, sample_orders):
+    t = object.__new__(SilverTransformer)
+    t.silver_dir = "s3a://silver-data/silver"
+    t.writer = MagicMock()
+
+    count = t._write_silver(sample_orders, "orders")
+    assert count == sample_orders.count()
+
+
+def test_write_silver_calls_writer_with_correct_path_and_defaults(spark, sample_orders):
+    t = object.__new__(SilverTransformer)
+    t.silver_dir = "s3a://silver-data/silver"
+    t.writer = MagicMock()
+
+    t._write_silver(sample_orders, "orders")
+
+    args, kwargs = t.writer.write.call_args
+    assert args[1] == "s3a://silver-data/silver/orders"
+    assert args[2] == "orders"
+    assert kwargs["mode"] == "overwrite"
+    assert kwargs["row_count"] == sample_orders.count()
+    assert kwargs["merge_schema"] is False
+
+
+def test_write_silver_passes_through_merge_schema_true(spark, sample_orders):
+    t = object.__new__(SilverTransformer)
+    t.silver_dir = "s3a://silver-data/silver"
+    t.writer = MagicMock()
+
+    t._write_silver(sample_orders, "orders", merge_schema=True)
+
+    _, kwargs = t.writer.write.call_args
+    assert kwargs["merge_schema"] is True
+
+
+def test_write_silver_unpersists_after_write(spark, sample_orders):
+    from pyspark import StorageLevel
+
+    t = object.__new__(SilverTransformer)
+    t.silver_dir = "s3a://silver-data/silver"
+    t.writer = MagicMock()
+
+    t._write_silver(sample_orders, "orders")
+
+    assert sample_orders.storageLevel == StorageLevel.NONE
+
+
+# ── 9. __init__ ────────────────────────────────────────────────────────────────
+
+def test_init_resolves_default_bronze_and_silver_dirs(spark):
+    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
+        t = SilverTransformer()
+    assert t.bronze_dir == "s3a://bronze-data/bronze"
+    assert t.silver_dir == "s3a://silver-data/silver"
+
+
+def test_init_accepts_explicit_dir_overrides(spark):
+    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
+        t = SilverTransformer(bronze_dir="custom/bronze", silver_dir="custom/silver")
+    assert t.bronze_dir == "custom/bronze"
+    assert t.silver_dir == "custom/silver"
+
+
+def test_init_default_schema_change_date(spark):
+    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
+        t = SilverTransformer()
+    assert t.schema_change_date == "2026-03-24"
+
+
+def test_init_custom_schema_change_date(spark):
+    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
+        t = SilverTransformer(schema_change_date="2026-06-01")
+    assert t.schema_change_date == "2026-06-01"
+
+
+# ── 10. _run_optimized — row-count telemetry passed to log_run ───────────────
+
+def test_run_optimized_logs_rows_in_and_out_for_orders(
+    transformer, spark, sample_orders, sample_order_items
+):
+    def mock_read(table):
+        if table == "orders":
+            return sample_orders
+        if table == "order_items":
+            return sample_order_items
+        return spark.createDataFrame([("x",)], ["id"])
+
+    transformer._read_bronze.side_effect = mock_read
+    transformer.run(mode="optimized")
+
+    call = next(
+        c for c in transformer.log_run.call_args_list if c.args[0] == "orders"
+    )
+    rows_in, rows_out = call.args[3], call.args[4]
+    assert rows_in == sample_orders.count()
+    assert rows_out == sample_orders.count()  # schema fix doesn't drop rows
+
+
+def test_run_optimized_logs_row_count_drop_for_deduped_order_items(
+    transformer, spark, sample_orders, sample_order_items
+):
+    def mock_read(table):
+        if table == "orders":
+            return sample_orders
+        if table == "order_items":
+            return sample_order_items
+        return spark.createDataFrame([("x",)], ["id"])
+
+    transformer._read_bronze.side_effect = mock_read
+    transformer.run(mode="optimized")
+
+    call = next(
+        c for c in transformer.log_run.call_args_list if c.args[0] == "order_items"
+    )
+    rows_in, rows_out = call.args[3], call.args[4]
+    assert rows_in == sample_order_items.count()
+    assert rows_out < rows_in
+
+
+# ── 11. main() entrypoint ─────────────────────────────────────────────────────
+
+def test_main_default_mode_is_optimized(monkeypatch):
+    captured = {}
+
+    class FakeTransformer:
+        def __init__(self, schema_change_date):
+            captured["schema_change_date"] = schema_change_date
+
+        def run(self, mode):
+            captured["mode"] = mode
+
+    monkeypatch.setattr(
+        "b_schema_pipelines.pipelines.silver.transform_silver.SilverTransformer",
+        FakeTransformer,
+    )
+    monkeypatch.setattr(sys, "argv", ["transform_silver.py"])
+
+    main()
+
+    assert captured["mode"] == "optimized"
+    assert captured["schema_change_date"] == "2026-03-24"
+
+
+def test_main_passes_custom_mode_and_schema_change_date(monkeypatch):
+    captured = {}
+
+    class FakeTransformer:
+        def __init__(self, schema_change_date):
+            captured["schema_change_date"] = schema_change_date
+
+        def run(self, mode):
+            captured["mode"] = mode
+
+    monkeypatch.setattr(
+        "b_schema_pipelines.pipelines.silver.transform_silver.SilverTransformer",
+        FakeTransformer,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "transform_silver.py",
+            "--mode", "baseline",
+            "--schema-change-date", "2026-01-01",
+        ],
+    )
+
+    main()
+
+    assert captured["mode"] == "baseline"
+    assert captured["schema_change_date"] == "2026-01-01"
+
+
+def test_main_rejects_invalid_mode(monkeypatch):
+    monkeypatch.setattr(
+        sys, "argv", ["transform_silver.py", "--mode", "nonsense"]
+    )
+    with pytest.raises(SystemExit):
+        main()

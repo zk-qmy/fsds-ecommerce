@@ -11,7 +11,7 @@ import json
 import re
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 import sys
 
 import pytest
@@ -20,15 +20,15 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from b_schema_pipelines.pipelines.pipeline_base import PipelineBase
 
-
 # ── Minimal concrete subclass ─────────────────────────────────────────────────
+
 
 class ConcretePipeline(PipelineBase):
     PREFIX = "test-pipeline"
 
     def __init__(self):
         super().__init__()
-        self.spark = MagicMock()   # never start a real session in base-class tests
+        self.spark = MagicMock()  # never start a real session in base-class tests
 
     def run(self):
         pass
@@ -36,12 +36,14 @@ class ConcretePipeline(PipelineBase):
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture
 def pipeline():
     return ConcretePipeline()
 
 
 # ── 1. run_id ─────────────────────────────────────────────────────────────────
+
 
 def test_run_id_contains_prefix(pipeline):
     assert pipeline.run_id.startswith("test-pipeline_")
@@ -73,6 +75,7 @@ def test_run_id_not_set_by_base_init_directly():
 
 # ── 2. Abstract enforcement ───────────────────────────────────────────────────
 
+
 def test_cannot_instantiate_pipeline_base_directly():
     with pytest.raises(TypeError):
         PipelineBase()  # type: ignore[abstract]
@@ -81,91 +84,142 @@ def test_cannot_instantiate_pipeline_base_directly():
 def test_subclass_without_run_raises():
     class Incomplete(PipelineBase):
         PREFIX = "incomplete"
+
         def __init__(self):
             super().__init__()
             self.spark = MagicMock()
+
         # run() deliberately omitted
 
     with pytest.raises(TypeError):
         Incomplete()  # type: ignore[abstract]
 
 
-# ── 3. _log_run ───────────────────────────────────────────────────────────────
-
-def test_log_run_emits_valid_json(pipeline, capsys):
-    start = datetime(2026, 4, 1, 1, 0, 0)
-    end   = datetime(2026, 4, 1, 1, 0, 5)
-    pipeline._log_run("orders", start, end, 1000, 980, "success")
-
-    captured = capsys.readouterr().out.strip()
-    parsed = json.loads(captured)   # raises if not valid JSON
-    assert isinstance(parsed, dict)
-
-
-@pytest.mark.parametrize("field", [
-    "run_id", "pipeline_name", "table", "start_ts", "end_ts",
-    "duration_s", "input_rows", "output_rows", "status", "error_summary",
-])
-def test_log_run_required_fields_present(field, pipeline, capsys):
-    start = datetime(2026, 4, 1, 1, 0, 0)
-    end   = datetime(2026, 4, 1, 1, 0, 5)
-    pipeline._log_run("orders", start, end, 1000, 980, "success")
-
-    parsed = json.loads(capsys.readouterr().out.strip())
-    assert field in parsed, f"Required field '{field}' missing from log"
-
-
-def test_log_run_duration_seconds_correct(pipeline, capsys):
-    start = datetime(2026, 4, 1, 0, 0, 0)
-    end   = datetime(2026, 4, 1, 0, 0, 10)
-    pipeline._log_run("orders", start, end, 100, 100, "success")
-
-    parsed = json.loads(capsys.readouterr().out.strip())
-    assert parsed["duration_s"] == 10.0
-
-
-def test_log_run_row_counts_recorded(pipeline, capsys):
-    start = end = datetime(2026, 4, 1)
-    pipeline._log_run("order_items", start, end, 909_000, 890_000, "success")
-
-    parsed = json.loads(capsys.readouterr().out.strip())
-    assert parsed["input_rows"]  == 909_000
-    assert parsed["output_rows"] == 890_000
-
-
-def test_log_run_error_summary_included(pipeline, capsys):
-    start = end = datetime(2026, 4, 1)
-    pipeline._log_run("orders", start, end, 0, 0, "failed", error="NullPointerException")
-
-    parsed = json.loads(capsys.readouterr().out.strip())
-    assert parsed["status"]        == "failed"
-    assert parsed["error_summary"] == "NullPointerException"
-
-
-def test_log_run_run_id_matches_instance(pipeline, capsys):
-    start = end = datetime(2026, 4, 1)
-    pipeline._log_run("orders", start, end, 1, 1, "success")
-
-    parsed = json.loads(capsys.readouterr().out.strip())
-    assert parsed["run_id"] == pipeline.run_id
-
-
 # ── 4. PREFIX ─────────────────────────────────────────────────────────────────
+
 
 def test_prefix_appears_in_run_id(pipeline):
     assert "test-pipeline" in pipeline.run_id
 
 
+# ── 5. _resolve_s3_config ─────────────────────────────────────────────────────
+
+
+def test_resolve_s3_config_returns_correct_s3a_uri(pipeline):
+    output_dir, cfg = pipeline._resolve_s3_config("bronze")
+    assert output_dir == "s3a://bronze-data/bronze"
+    assert cfg["endpoint"] == pipeline.shared_cfg["minio"]["endpoint"]
+
+
+def test_resolve_s3_config_unknown_layer_raises(pipeline):
+    with pytest.raises(ValueError):
+        pipeline._resolve_s3_config("platinum")
+
+
+# ── 6. log_run — level routing (drives Grafana/Loki alerting) ────────────────
+
+
+def test_log_run_uses_error_level_only_for_status_error(pipeline):
+    start = end = datetime(2026, 4, 1)
+
+    pipeline.logger = MagicMock()
+    pipeline.log_run("orders", start, end, 0, 0, "error", error="boom")
+    pipeline.logger.error.assert_called_once()
+    pipeline.logger.info.assert_not_called()
+
+    pipeline.logger = MagicMock()
+    pipeline.log_run("orders", start, end, 100, 100, "success")
+    pipeline.logger.info.assert_called_once()
+    pipeline.logger.error.assert_not_called()
+
+
+# ── 7. log_run — structured JSON payload (consumed by Loki/Grafana queries) ──
+
+
+def test_log_run_structured_json_fields_and_duration(pipeline):
+    pipeline.logger = MagicMock()
+    start = datetime(2026, 4, 1, 1, 0, 0)
+    end = datetime(2026, 4, 1, 1, 0, 5)
+
+    pipeline.log_run("orders", start, end, 1000, 980, "success")
+
+    json_arg = pipeline.logger.debug.call_args.args[1]
+    payload = json.loads(json_arg)
+    for field in (
+        "run_id", "pipeline_name", "table", "start_ts", "end_ts",
+        "duration_s", "input_rows", "output_rows", "status", "error_summary",
+    ):
+        assert field in payload, f"Required field '{field}' missing from log"
+    assert payload["duration_s"] == 5.0
+    assert payload["input_rows"] == 1000
+    assert payload["output_rows"] == 980
+    assert payload["run_id"] == pipeline.run_id
+
+
+# ── 8. _create_spark_session — Delta + S3A/MinIO wiring ──────────────────────
+
+
+def test_create_spark_session_configures_delta_and_s3a(monkeypatch):
+    """Faking SparkSession.builder avoids the JVM's one-session-per-process
+    quirk: once any test starts a real SparkSession, later getOrCreate() calls
+    silently reuse it and ignore new config, which would let a broken key
+    name here pass unnoticed.
+    """
+    calls = {}
+
+    class FakeBuilder:
+        def master(self, *a):
+            return self
+
+        def appName(self, *a):
+            return self
+
+        def config(self, key, value):
+            calls[key] = value
+            return self
+
+        def getOrCreate(self):
+            return MagicMock()
+
+    monkeypatch.setattr(
+        "b_schema_pipelines.pipelines.pipeline_base.SparkSession.builder",
+        FakeBuilder(),
+    )
+
+    class ConfigCheckPipeline(PipelineBase):
+        PREFIX = "cfgcheck"
+
+        def run(self):
+            pass
+
+    p = ConfigCheckPipeline()
+
+    assert calls["spark.sql.extensions"] == "io.delta.sql.DeltaSparkSessionExtension"
+    assert calls["spark.hadoop.fs.s3a.endpoint"] == p.shared_cfg["minio"]["endpoint"]
+    assert calls["spark.hadoop.fs.s3a.access.key"] == p.shared_cfg["minio"]["access_key"]
+    assert calls["spark.hadoop.fs.s3a.secret.key"] == p.shared_cfg["minio"]["secret_key"]
+
+
 def test_each_subclass_has_own_prefix():
     class PipelineA(PipelineBase):
         PREFIX = "alpha"
-        def __init__(self): super().__init__(); self.spark = MagicMock()
-        def run(self): pass
+
+        def __init__(self):
+            super().__init__()
+            self.spark = MagicMock()
+
+        def run(self):
+            pass
 
     class PipelineB(PipelineBase):
         PREFIX = "beta"
-        def __init__(self): super().__init__(); self.spark = MagicMock()
-        def run(self): pass
+
+        def __init__(self):
+            super().__init__()
+            self.spark = MagicMock()
+
+        def run(self):
+            pass
 
     a, b = PipelineA(), PipelineB()
     assert a.run_id.startswith("alpha_")
