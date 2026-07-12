@@ -54,8 +54,8 @@ def source_dir(spark, tmp_path):
 
     # order_items
     spark.createDataFrame(
-        [("OI001", "O001", "P001", 2, 999.0, 10.0, T(2026, 2, 1))],
-        ["order_item_id", "order_id", "product_id", "quantity", "unit_price", "discount_amount", "created_ts"],
+        [("OI001", "O001", "P001", 2, 999.0, 10.0, 1988.0, T(2026, 2, 1))],
+        ["order_item_id", "order_id", "product_id", "quantity", "unit_price", "discount", "line_total", "created_ts"],
     ).write.parquet(str(offline / "order_items.parquet"))
 
     # payments
@@ -69,8 +69,12 @@ def source_dir(spark, tmp_path):
     streaming.mkdir()
     events = [
         {"event_id": "E001", "event_type": "view", "customer_id": "C001",
+         "session_id": "S001", "product_id": "P001", "order_id": None,
+         "quantity": None, "price": None,
          "event_timestamp": "2026-04-01 12:00:00", "created_ts": "2026-04-01 12:00:00"},
         {"event_id": "E002", "event_type": "purchase", "customer_id": "C002",
+         "session_id": "S002", "product_id": "P001", "order_id": "O001",
+         "quantity": 1, "price": 999.0,
          "event_timestamp": "2026-04-01 20:00:00", "created_ts": "2026-04-01 20:00:00"},
     ]
     with open(streaming / "events.json", "w") as f:
@@ -224,8 +228,8 @@ def test_ingest_events_row_count_matches_source(ingester, spark, source_dir, tmp
 def test_ingest_events_logs_success(ingester, capsys):
     ingester._ingest_events()
     # Last JSON line in stdout
-    output = [json.loads(l) for l in capsys.readouterr().out.strip().splitlines()]
-    events_log = next(l for l in output if l["table"] == "events")
+    output = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    events_log = next(line for line in output if line["table"] == "events")
     assert events_log["status"] == "success"
 
 
@@ -247,8 +251,8 @@ def test_run_produces_events_table(ingester, tmp_path):
 def test_run_logs_one_entry_per_table(ingester, capsys):
     with patch.object(ingester.spark, "stop"):
         ingester.run()
-    lines = [l for l in capsys.readouterr().out.strip().splitlines() if l]
-    logs = [json.loads(l) for l in lines]
-    tables_logged = {l["table"] for l in logs}
+    lines = [line for line in capsys.readouterr().out.strip().splitlines() if line]
+    logs = [json.loads(line) for line in lines]
+    tables_logged = {line["table"] for line in logs}
     expected = set(OFFLINE_TABLES) | {"events"}
     assert tables_logged == expected

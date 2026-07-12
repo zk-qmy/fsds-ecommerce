@@ -173,8 +173,10 @@ def test_run_baseline_no_schema_evolution_fix(transformer, sample_orders):
 
 def test_run_optimized_applies_schema_fix(transformer, spark, sample_orders, sample_order_items):
     def mock_read(table):
-        if table == "orders":      return sample_orders
-        if table == "order_items": return sample_order_items
+        if table == "orders":
+            return sample_orders
+        if table == "order_items":
+            return sample_order_items
         return spark.createDataFrame([("x",)], ["id"])
 
     transformer._read_bronze.side_effect = mock_read
@@ -190,8 +192,10 @@ def test_run_optimized_applies_schema_fix(transformer, spark, sample_orders, sam
 
 def test_run_optimized_applies_dedup(transformer, spark, sample_orders, sample_order_items):
     def mock_read(table):
-        if table == "orders":      return sample_orders
-        if table == "order_items": return sample_order_items
+        if table == "orders":
+            return sample_orders
+        if table == "order_items":
+            return sample_order_items
         return spark.createDataFrame([("x",)], ["id"])
 
     transformer._read_bronze.side_effect = mock_read
