@@ -104,24 +104,24 @@ services:
   #   working_dir: /app
   #   command: ["tail", "-f", "/dev/null"]   # keep alive; exec or run commands against it
 
-  # # ── Relational DB — Gold tables + feature store + Airflow metadata ─────────
+  # ── Relational DB — Gold tables + feature store + Airflow metadata ─────────
 
-  # postgres:
-  #   image: postgres:15
-  #   container_name: fsds-postgres
-  #   hostname: postgres
-  #   ports:
-  #     - "5432:5432"
-  #   environment:
-  #     POSTGRES_USER:     fsds
-  #     POSTGRES_PASSWORD: fsds
-  #     POSTGRES_DB:       fsds
-  #   volumes:
-  #     - postgres_data:/var/lib/postgresql/data
-  #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U fsds"]
-  #     interval: 10s
-  #     retries: 5
+  postgres:
+    image: postgres:15
+    container_name: fsds-postgres
+    hostname: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER:     fsds
+      POSTGRES_PASSWORD: fsds
+      POSTGRES_DB:       fsds
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fsds"]
+      interval: 10s
+      retries: 5
 
   # # ── Online feature store ───────────────────────────────────────────────────
 
@@ -175,7 +175,7 @@ services:
 
 volumes:
   minio_storage:
-  # postgres_data:
+  postgres_data:
   # redis_data:
   # airflow_logs:
   #spark_ivy_cache:
