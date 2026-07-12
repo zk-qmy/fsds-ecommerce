@@ -21,8 +21,8 @@ Both paths feed the Bronze → Silver → Gold pipeline (Section 02), the drift/
 | `customers` | one per customer | customer_id, signup_ts, country, segment, marketing_opt_in |
 | `products` | one per product | product_id, category, brand, base_price, is_active, created_ts |
 | `orders` | one per order | order_id, customer_id, order_timestamp, status, shipping_city, shipping_method, coupon_code |
-| `order_items` | one per line item | order_item_id, order_id, product_id, quantity, unit_price, discount_amount |
-| `payments` | one per payment | payment_id, order_id, payment_timestamp, payment_method, amount, payment_status |
+| `order_items` | one per line item | order_item_id, order_id, product_id, quantity, unit_price, discount, line_total |
+| `payments` | one per payment | payment_id, order_id, payment_timestamp, amount, payment_method, payment_status |
 
 ### 2.2 Volume Estimates
 

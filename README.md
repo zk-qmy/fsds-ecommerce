@@ -8,7 +8,9 @@ Predicts `will_purchase_next_session` for 120,000 customers across a 180-day his
 ## Table of Contents
 
 - [Setup](#setup)
+- [Local Services & Ports](#local-services--ports)
 - [Section 01 — Data Generator](#section-01--data-generator)
+- [Section 02 — Schema Pipelines](#section-02--schema-pipelines)
 - [Repository Structure](#repository-structure)
 - [Git Convention](#git-convention)
 
@@ -16,23 +18,40 @@ Predicts `will_purchase_next_session` for 120,000 customers across a 180-day his
 
 ## Setup
 
+Requires Python 3.13 and [uv](https://github.com/astral-sh/uv).
+
 ```bash
-# Clone and install
 git clone <repo-url>
 cd fsds-ecommerce
 uv sync
-```
-
-Requires Python 3.13 and [uv](https://github.com/astral-sh/uv).
-
----
-## Activate .venv
-
-```bash
-cd /mnt/d/fsds-ecommerce
-uv sync
 source .venv/bin/activate
 ```
+
+---
+
+## Local Services & Ports
+
+Started via `docker compose -f infra/docker-compose.yml up -d`, plus the Spark UIs that come up while running Section 02 pipelines.
+
+| Service | URL | Port(s) | Login | Notes |
+|---|---|---|---|---|
+| [MinIO Console](http://localhost:9001) | http://localhost:9001 | 9001 (console), 9000 (S3 API) | `minio_access_key` / `minio_secret_key` | Bronze/Silver Delta Lake object storage |
+| [Trino Web UI](http://localhost:8080) | http://localhost:8080 | 8080 | — | Query engine, JDBC on same port |
+| Hive Metastore | `thrift://localhost:9083` | 9083 | — | Internal — Trino's catalog connection, no web UI |
+| Hive Metastore DB | `localhost:5433` | 5433→5432 | `hive` / `hive` | Postgres backing the metastore, not the Gold DB |
+| PostgreSQL (Gold + features) | `localhost:5432` | 5432 | `fsds` / `fsds` | `gold_ecommerce` schema, DB `fsds` |
+| [Spark UI](http://localhost:4040) | http://localhost:4040 | 4040 | — | Live DAGs/stages — only while a pipeline job is running |
+| [Spark History Server](http://localhost:18080) | http://localhost:18080 | 18080 | — | Completed job UIs — start with `$SPARK_HOME/sbin/start-history-server.sh` |
+
+Commented out in `infra/docker-compose.yml` by default (uncomment + `docker compose up -d <service>` to enable):
+
+| Service | Port | Notes |
+|---|---|---|
+| Redis | 6379 | Online feature store (Section 04) |
+| MLflow | 5000 | Experiment tracking / model registry (Section 04) |
+| Airflow webserver | 8081→8080 | DAG orchestration UI (Section 02/04) |
+
+---
 
 ## Section 01 — Data Generator
 
@@ -92,38 +111,113 @@ duplicate_rate_stream: 0.015       # Problem F
 
 ---
 
+## Section 02 — Schema Pipelines
+
+Bronze → Silver → Gold → Feature pipelines. Reads Section 01 outputs, lands them as Delta Lake tables (Bronze/Silver, on MinIO), builds the Kimball star schema (Gold, on PostgreSQL), then computes offline/streaming feature tables for Feast.
+
+**Design docs:**
+- [`b_schema_pipelines/docs/02_schema_piplines.md`](b_schema_pipelines/docs/02_schema_piplines.md) — schema design
+- [`b_schema_pipelines/docs/02_spark_optimisation_report.md`](b_schema_pipelines/docs/02_spark_optimisation_report.md) — Spark optimisation before/after
+- [`b_schema_pipelines/pipelines/bronze/README.md`](b_schema_pipelines/pipelines/bronze/README.md) — Bronze + Silver run guide
+- [`b_schema_pipelines/pipelines/gold/README.md`](b_schema_pipelines/pipelines/gold/README.md) — Gold run guide
+
+### Run
+
+```bash
+cd /mnt/d/fsds-ecommerce
+source .venv/bin/activate
+
+# Step 0 — start MinIO/Trino/Postgres (see Local Services & Ports)
+docker compose -f infra/docker-compose.yml up -d
+
+# Step 0b — one-time: create the Gold schema in Postgres
+docker exec -it fsds-postgres psql -U fsds -d fsds -c "CREATE SCHEMA IF NOT EXISTS gold_ecommerce;"
+
+# Step 0c — start the Spark History Server (captures completed-job UI)
+export SPARK_HOME=$(python3 -c "import pyspark, os; print(os.path.dirname(pyspark.__file__))")
+mkdir -p /tmp/spark-events
+$SPARK_HOME/sbin/start-history-server.sh
+# If you see "HistoryServer running as process XXXX. Stop it first." — reset it:
+#   $SPARK_HOME/sbin/stop-history-server.sh && $SPARK_HOME/sbin/start-history-server.sh
+
+# Step 1 — Bronze: raw parquet/NDJSON → Delta Lake (MinIO)
+uv run python3 b_schema_pipelines/pipelines/bronze/ingest_bronze.py
+
+# Step 2 — Silver: dedup, NULL-fill, skew/broadcast join fixes
+uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode baseline
+uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
+
+# Step 3 — Gold: dim/fact/OBT star schema → PostgreSQL gold_ecommerce
+uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py
+
+# Step 4 — Features: rolling 90d + 60m aggregations → Feast-ready tables
+uv run python b_schema_pipelines/pipelines/features/feature_customer_90d.py
+uv run python b_schema_pipelines/pipelines/features/feature_customer_60m.py
+```
+
+### Outputs
+
+| Layer | Storage | Location |
+|---|---|---|
+| Bronze | Delta Lake | `s3a://bronze-data/bronze/<table>/` on MinIO |
+| Silver | Delta Lake | `s3a://silver-data/silver/<table>/` on MinIO |
+| Gold | PostgreSQL | `gold_ecommerce.{dim_*, fact_*, obt_order_performance}` |
+| Features | PostgreSQL | `feat_customer_90d`, `feat_stream_60m` |
+| Logs | Text | `logs/{bronze,silver,gold}/<run_id>.log` |
+
+See [Local Services & Ports](#local-services--ports) for MinIO/Postgres/Spark UI access.
+
+### Cleanup
+
+```bash
+# Delete all objects + the bucket bronze-data itself
+docker exec fsds-minio mc rb --force local/bronze-data
+
+# Stop the Spark History Server
+$SPARK_HOME/sbin/stop-history-server.sh
+rm -rf /tmp/spark-events/*
+```
+
+---
+
 ## Repository Structure
+
+Reflects what's actually implemented today. `c_drift_labels/` (Section 03) and most of `d_ml/` (Section 04) are scaffolded directories, not yet built out.
 
 ```
 fsds-ecommerce/
-├── a_data_generator/         # Section 01 — synthetic data generator
+├── a_data_generator/            # Section 01 — synthetic data generator
 │   ├── generator.py
 │   ├── config/generator_config.yaml
 │   ├── docs/01_data_generator.md
-│   └── outputs/              # offline/ + streaming/ (generated, not committed)
-├── b_schema_pipelines/       # Section 02 — Bronze/Silver/Gold/Feature pipelines
-│   ├── pipelines/            # bronze/ silver/ gold/ features/
-│   ├── dags/                 # Airflow DAGs (DP1/DP2/DP3 + materialize)
-│   ├── dq/                   # Great Expectations suites
-│   └── docs/02_schema_design.md
-├── c_drift_labels/           # Section 03 — drift injection + ML labels
-├── d_ml/                     # Section 04 — ML system (train, serve, monitor)
-│   ├── design/04_ml_design.md
-│   ├── src/                  # TrainingDataService, SplitService, ModelService, ...
-│   ├── pipelines/            # Kubeflow training + Airflow scoring/retrain DAGs
-│   └── api/                  # FastAPI inference + drift detection APIs
+│   └── outputs/                 # offline/ + streaming/ (generated, not committed)
+├── b_schema_pipelines/          # Section 02 — Bronze/Silver/Gold/Feature pipelines
+│   ├── pipelines/
+│   │   ├── bronze/               # ingest_bronze.py + README.md
+│   │   ├── silver/                # transform_silver.py
+│   │   ├── gold/                    # build_gold.py + README.md
+│   │   ├── features/              # feature_customer_90d.py, feature_customer_60m.py
+│   │   ├── common/                 # delta_writer.py
+│   │   └── pipeline_config.yaml    # shared MinIO/Postgres/Delta config
+│   ├── dags/                     # Airflow DAGs (scaffolded)
+│   ├── dq/                       # Great Expectations suites (scaffolded)
+│   └── docs/                     # 02_schema_piplines.md, 02_spark_optimisation_report.md
+├── c_drift_labels/               # Section 03 — drift injection + ML labels (scaffolded)
+├── d_ml/                         # Section 04 — ML system (scaffolded)
+│   ├── api/                      # FastAPI inference + drift-detection service stubs
+│   ├── design/ pipelines/ src/ cicd/
 ├── infra/
-│   ├── docker-compose.yml    # local dev stack (postgres, airflow, mlflow, minio, redis)
-│   ├── helm/                 # Helm charts for all services
-│   ├── terraform/            # GKE cluster + VPC + IAM
-│   └── ansible/              # CI runner config (kubectl, helm, gcloud)
+│   ├── docker-compose.yml        # local dev stack (MinIO, Trino, Postgres)
+│   ├── terraform/                # GKE cluster + VPC + IAM (planned)
+│   └── ansible/                  # CI runner config (planned)
 ├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── load/locustfile.py
+│   ├── a_data_generator/         # Section 01 tests
+│   └── b_schema_pipelines/       # Section 02 tests (Bronze/Silver/Gold/Features)
 ├── config/
 │   ├── settings.py
 │   └── logging.py
+├── docs/                         # cross-cutting design notes (e.g. docker_optimize.md)
+├── coursework/                   # coursework proposal + implementation plan
 └── pyproject.toml
 ```
 
@@ -148,8 +242,8 @@ git checkout develop && git pull
 git checkout -b feature/<name>
 ```
 
-## CI check before push
+### CI check before push
+
 ```bash
 uv run ruff check . && uv run pytest --cov=d_ml --cov-report=term-missing tests/ -v
-
 ```
