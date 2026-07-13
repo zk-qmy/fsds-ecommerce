@@ -6,7 +6,7 @@ Reads Flink-processed events (or raw events.json in local dev), computes
 to feat_stream_60m (PostgreSQL) ready for Feast ingestion.
 
 Run:
-    uv run python b_schema_pipelines/pipelines/features/feature_customer_60m.py
+    uv run python b_schema_pipelines/pipelines/features/feat_stream_60m.py
 """
 
 from __future__ import annotations

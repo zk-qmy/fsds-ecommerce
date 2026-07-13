@@ -167,8 +167,8 @@ uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode baseline
 uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode optimized
 
 # Step 4 — Features: rolling 90d + 60m aggregations → Feast-ready tables
-uv run python b_schema_pipelines/pipelines/features/feature_customer_90d.py
-uv run python b_schema_pipelines/pipelines/features/feature_customer_60m.py
+uv run python b_schema_pipelines/pipelines/features/feat_customer_90d.py
+uv run python b_schema_pipelines/pipelines/features/feat_stream_60m.py
 ```
 
 ### Outputs
@@ -212,7 +212,7 @@ fsds-ecommerce/
 │   │   ├── bronze/               # ingest_bronze.py + README.md
 │   │   ├── silver/                # transform_silver.py
 │   │   ├── gold/                    # build_gold.py + README.md
-│   │   ├── features/              # feature_customer_90d.py, feature_customer_60m.py
+│   │   ├── features/              # feat_customer_90d.py, feat_stream_60m.py
 │   │   ├── common/                 # delta_writer.py
 │   │   └── pipeline_config.yaml    # shared MinIO/Postgres/Delta config
 │   ├── dags/                     # Airflow DAGs (scaffolded)

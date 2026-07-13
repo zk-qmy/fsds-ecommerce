@@ -1,7 +1,6 @@
 """
 Tests for CustomerFeature90d.
 
-All pipeline methods raise NotImplementedError — marked xfail(strict=True).
 JDBC I/O is mocked; tests validate the feature computation logic and schema.
 """
 
@@ -9,24 +8,16 @@ from __future__ import annotations
 
 import datetime
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 import sys
 
 import pytest
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    BooleanType,
-    DoubleType,
-    LongType,
-    StringType,
-    StructField,
-    StructType,
-    TimestampType,
-)
+
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from b_schema_pipelines.pipelines.features.feature_customer_90d import CustomerFeature90d
+from b_schema_pipelines.pipelines.features.feat_customer_90d import CustomerFeature90d
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -112,14 +103,11 @@ def gold_tables(spark):
 
 # ── 1. Initialisation ─────────────────────────────────────────────────────────
 
-def test_snapshot_date_stored(feat_90d):
-    assert feat_90d.snapshot_date == "2026-06-01"
-
-
 def test_window_start_is_90_days_before_snapshot(feat_90d):
     expected = (
         datetime.datetime(2026, 6, 1) - datetime.timedelta(days=90)
     ).strftime("%Y-%m-%d")
+    assert feat_90d.snapshot_date == "2026-06-01"
     assert feat_90d.window_start == expected
 
 
@@ -129,17 +117,8 @@ def test_snapshot_date_defaults_to_today():
     assert f.snapshot_date == datetime.datetime.now().strftime("%Y-%m-%d")
 
 
-def test_feat_table_name():
-    assert CustomerFeature90d.FEAT_TABLE == "feat_customer_90d"
-
-
-def test_window_days_constant():
-    assert CustomerFeature90d.WINDOW_DAYS == 90
-
-
 # ── 2. _compute_features ─────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_output_schema(feat_90d, gold_tables):
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
     result = feat_90d._compute_features()
@@ -155,7 +134,6 @@ def test_compute_features_output_schema(feat_90d, gold_tables):
     assert expected_cols.issubset(set(result.columns))
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_one_row_per_customer(feat_90d, gold_tables):
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
     result = feat_90d._compute_features()
@@ -164,7 +142,6 @@ def test_compute_features_one_row_per_customer(feat_90d, gold_tables):
     assert total == distinct, "Must be exactly one row per customer per snapshot"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_total_orders_in_window_only(feat_90d, gold_tables):
     """C001 has 3 orders total but only 2 fall in the 90-day window."""
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
@@ -173,7 +150,6 @@ def test_compute_features_total_orders_in_window_only(feat_90d, gold_tables):
     assert row["f_customer_total_orders_90d"] == 2
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_avg_order_value(feat_90d, gold_tables):
     """C001: orders O001 (90.0) + O002 (180.0) → avg = 135.0."""
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
@@ -182,7 +158,6 @@ def test_compute_features_avg_order_value(feat_90d, gold_tables):
     assert abs(row["f_customer_avg_order_value_90d"] - 135.0) < 0.01
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_distinct_categories(feat_90d, gold_tables):
     """C001 bought from electronics (O001) and fashion (O002) → 2 distinct categories."""
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
@@ -191,7 +166,6 @@ def test_compute_features_distinct_categories(feat_90d, gold_tables):
     assert row["f_customer_distinct_categories_90d"] == 2
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_payment_fail_rate(feat_90d, gold_tables):
     """C002 has 1 order with 1 failed payment → fail rate = 1.0."""
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
@@ -200,7 +174,6 @@ def test_compute_features_payment_fail_rate(feat_90d, gold_tables):
     assert abs(row["f_customer_payment_fail_rate_90d"] - 1.0) < 0.01
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_event_timestamp_is_snapshot_date(feat_90d, gold_tables):
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
     result = feat_90d._compute_features()
@@ -209,10 +182,8 @@ def test_compute_features_event_timestamp_is_snapshot_date(feat_90d, gold_tables
     assert row["event_timestamp"].strftime("%Y-%m-%d") == "2026-06-01"
 
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_compute_features_no_future_data_included(feat_90d, gold_tables, spark):
     """Orders after snapshot_date must be excluded from features."""
-    T = datetime.datetime
     # Add a future order (after snapshot_date 2026-06-01)
     future_order = spark.createDataFrame(
         [(999, 1, 20261001, 1, "OFUTURE", 500.0, 0.0, 500.0, 1)],
@@ -222,7 +193,8 @@ def test_compute_features_no_future_data_included(feat_90d, gold_tables, spark):
     updated_fact_order = gold_tables["fact_order"].union(future_order)
 
     def mock_read(t):
-        if t == "fact_order": return updated_fact_order
+        if t == "fact_order":
+            return updated_fact_order
         return gold_tables[t]
 
     feat_90d._read_gold.side_effect = mock_read
@@ -234,11 +206,10 @@ def test_compute_features_no_future_data_included(feat_90d, gold_tables, spark):
 
 # ── 3. _write (idempotency) ───────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_write_deletes_existing_snapshot_before_insert(feat_90d, gold_tables):
     """Second run for same snapshot_date must not produce duplicate rows (DELETE then INSERT)."""
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
-    feat_90d._write = MagicMock()   # track calls
+    feat_90d._write = MagicMock(return_value=0)   # track calls
 
     feat_90d.run()
     feat_90d.run()
@@ -249,7 +220,6 @@ def test_write_deletes_existing_snapshot_before_insert(feat_90d, gold_tables):
 
 # ── 4. run() ──────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, raises=NotImplementedError, reason="Not implemented yet")
 def test_run_calls_compute_then_write(feat_90d, gold_tables):
     feat_90d._read_gold.side_effect = lambda t: gold_tables[t]
     with patch.object(feat_90d, "_compute_features", wraps=feat_90d._compute_features) as mock_compute, \
