@@ -22,15 +22,20 @@ from b_schema_pipelines.pipelines.gold.build_gold import GoldBuilder
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def builder(spark):
+def _make_builder(spark, mode="optimized"):
     """GoldBuilder with Spark and all I/O methods mocked."""
     with patch.object(GoldBuilder, "_build_spark", return_value=spark):
-        b = GoldBuilder()
+        b = GoldBuilder(mode=mode)
     b._read_silver   = MagicMock()
     b._read_postgres = MagicMock(return_value=spark.createDataFrame([], schema="customer_key INT"))
     b._write_postgres = MagicMock(side_effect=lambda df, *a, **kw: df.count())
     return b
+
+
+@pytest.fixture
+def builder(spark):
+    """GoldBuilder in the default (optimized) surrogate-key mode."""
+    return _make_builder(spark)
 
 
 @pytest.fixture
@@ -711,3 +716,48 @@ def test_run_reraises_the_original_exception_after_logging(builder):
 
     with pytest.raises(ValueError, match="schema drift"):
         builder.run()
+
+
+# ── 20/21. Surrogate-key modes: baseline vs optimized ────────────────────────
+
+def test_optimized_surrogate_keys_match_baseline(spark):
+    """The parallel (range-partition + offset) key assignment must be a
+    drop-in replacement for the naive single-partition row_number() — same
+    order_col value must get the exact same key under both modes, not just
+    a similar-looking one.
+    """
+    df = spark.createDataFrame(
+        [(f"O{str(i).zfill(3)}",) for i in [5, 1, 4, 2, 3]], ["order_id"]
+    )
+    baseline_builder = _make_builder(spark, mode="baseline")
+    optimized_builder = _make_builder(spark, mode="optimized")
+
+    baseline_map = {
+        r["order_id"]: r["order_key"]
+        for r in baseline_builder._assign_surrogate_keys(df, "order_key", "order_id").collect()
+    }
+    optimized_map = {
+        r["order_id"]: r["order_key"]
+        for r in optimized_builder._assign_surrogate_keys(df, "order_key", "order_id").collect()
+    }
+    assert optimized_map == baseline_map
+
+
+def test_optimized_surrogate_keys_are_gapfree_sequential(spark):
+    """Keys must be exactly 1..N with no gaps or duplicates, matching the
+    baseline row_number() contract, even when the data spans more rows than
+    the local test cluster has partitions for."""
+    n = 50
+    df = spark.createDataFrame([(f"O{str(i).zfill(4)}",) for i in range(n)], ["order_id"])
+    optimized_builder = _make_builder(spark, mode="optimized")
+    keys = sorted(
+        r["order_key"]
+        for r in optimized_builder._assign_surrogate_keys(df, "order_key", "order_id").collect()
+    )
+    assert keys == list(range(1, n + 1))
+
+
+def test_invalid_mode_raises(spark):
+    with patch.object(GoldBuilder, "_build_spark", return_value=spark):
+        with pytest.raises(ValueError, match="Unknown mode"):
+            GoldBuilder(mode="turbo")

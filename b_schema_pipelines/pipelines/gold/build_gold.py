@@ -4,12 +4,18 @@ Gold layer builder.
 Reads from Silver Delta Lake and writes all dim/fact/obt tables into
 PostgreSQL under the `gold_ecommerce` schema.
 
+Two surrogate-key modes (see gold/README.md for the Spark UI before/after):
+    baseline   — global row_number() over a single unpartitioned Window
+    optimized  — range-partitioned, parallel ranking (default)
+
 Run:
-    uv run python b_schema_pipelines/pipelines/gold/build_gold.py
+    uv run python b_schema_pipelines/pipelines/gold/build_gold.py --mode baseline
+    uv run python b_schema_pipelines/pipelines/gold/build_gold.py --mode optimized
 """
 
 from __future__ import annotations
 
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -36,12 +42,16 @@ class GoldBuilder(PipelineBase):
         postgres_url: str = "jdbc:postgresql://localhost:5432/fsds",
         schema: str = "gold_ecommerce",
         days_history: int = 180,
+        mode: str = "optimized",
     ):
         super().__init__()
+        if mode not in ("baseline", "optimized"):
+            raise ValueError(f"Unknown mode: {mode!r}. Choose 'baseline' or 'optimized'.")
         self.silver_dir = silver_dir or self._resolve_s3_config("silver")[0]
         self.postgres_url = postgres_url
         self.schema = schema
         self.days_history = days_history
+        self.mode = mode
 
         pg_cfg = self.shared_cfg.get("postgres", {})
         self.postgres_user = pg_cfg.get("user", "fsds")
@@ -145,14 +155,69 @@ class GoldBuilder(PipelineBase):
     # ── private: shared surrogate-key helpers ──────────────────────────────────
 
     def _assign_surrogate_keys(self, df, key_col: str, order_col: str, start: int = 1):
-        """Deterministic surrogate key: row_number() ordered by a business key.
+        """Deterministic surrogate key: rank ordered by a business key.
 
         Reproducible across independent calls over the same input (unlike
         F.monotonically_increasing_id(), which is partition-order dependent),
         so a dim's key assignment and a fact's lookup of that same dim agree.
+        Dispatches to baseline or optimized implementation per `self.mode`
+        (see gold/README.md for the Spark UI before/after comparison).
+        """
+        if self.mode == "baseline":
+            return self._assign_surrogate_keys_baseline(df, key_col, order_col, start)
+        return self._assign_surrogate_keys_optimized(df, key_col, order_col, start)
+
+    def _assign_surrogate_keys_baseline(self, df, key_col: str, order_col: str, start: int = 1):
+        """Global row_number() over a single unpartitioned Window.
+
+        Correct and simple, but Spark must funnel the entire DataFrame through
+        one task to compute it (WARN WindowExec: No Partition Defined) — every
+        row is sorted on a single executor with no parallelism. Fine at small
+        scale; a real bottleneck as tables grow. Kept only as the "before"
+        side of the baseline/optimized comparison.
         """
         w = Window.orderBy(order_col)
         return df.withColumn(key_col, F.row_number().over(w) + F.lit(start - 1))
+
+    def _assign_surrogate_keys_optimized(
+        self, df, key_col: str, order_col: str, start: int = 1, num_partitions: int | None = None
+    ):
+        """Same deterministic, gap-free global ranking as the baseline, computed
+        in parallel instead of on a single task.
+
+        1. `repartitionByRange` splits rows into N partitions that are already
+           globally ordered by `order_col` (every value in partition i sorts
+           before every value in partition i + 1).
+        2. Rank locally within each partition — this Window *is* partitioned,
+           so Spark runs it as N parallel tasks instead of one.
+        3. Add each partition's row count as a running offset, so local ranks
+           become globally sequential. The offset step still uses an
+           unpartitioned Window, but over one row per partition (tens, not
+           hundreds of thousands) — negligible compared to sorting the full
+           table on a single task.
+
+        Requires `order_col` values to be unique (true for every caller here —
+        business keys like order_id/product_id/customer_id, or order_item_id).
+        """
+        num_partitions = num_partitions or self.spark.sparkContext.defaultParallelism
+        ranged = df.repartitionByRange(num_partitions, order_col).withColumn(
+            "_pid", F.spark_partition_id()
+        )
+
+        local_rank_w = Window.partitionBy("_pid").orderBy(order_col)
+        ranked = ranged.withColumn("_local_rank", F.row_number().over(local_rank_w))
+
+        partition_counts = ranked.groupBy("_pid").agg(F.count(F.lit(1)).alias("_count"))
+        offset_w = Window.orderBy("_pid").rowsBetween(Window.unboundedPreceding, -1)
+        partition_offsets = partition_counts.withColumn(
+            "_offset", F.coalesce(F.sum("_count").over(offset_w), F.lit(0))
+        ).select("_pid", "_offset")
+
+        return (
+            ranked.join(F.broadcast(partition_offsets), on="_pid", how="left")
+            .withColumn(key_col, F.col("_local_rank") + F.col("_offset") + F.lit(start - 1))
+            .drop("_pid", "_local_rank", "_offset")
+        )
 
     def _static_dim(self, values: list[str], business_col: str, key_col: str):
         rows = [(i + 1, v) for i, v in enumerate(values)]
@@ -441,7 +506,11 @@ class GoldBuilder(PipelineBase):
 # ── entrypoint ────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    GoldBuilder().run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["baseline", "optimized"], default="optimized")
+    args = parser.parse_args()
+
+    GoldBuilder(mode=args.mode).run()
 
 
 if __name__ == "__main__":

@@ -51,6 +51,21 @@ Commented out in `infra/docker-compose.yml` by default (uncomment + `docker comp
 | MLflow | 5000 | Experiment tracking / model registry (Section 04) |
 | Airflow webserver | 8081→8080 | DAG orchestration UI (Section 02/04) |
 
+**Browsing Postgres with a GUI** — connect [DBeaver](https://dbeaver.io/) (or any PostgreSQL client):
+
+- Open the DBeaver app (desktop)
+- **Database** tab → **New Database Connection**
+- Choose **PostgreSQL**
+- Enter the connection info:
+  - Host: `localhost`
+  - Port: `5432`
+  - Database: `fsds`
+  - User / password: `fsds` / `fsds`
+- Click **Test Connection**, then **Finish**
+- Right-click the `gold_ecommerce` schema → **View Diagram** for an ER diagram
+
+![gold_ecommerce ER diagram](assets/gold-schema.png)
+
 ---
 
 ## Section 01 — Data Generator
@@ -148,7 +163,8 @@ uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode ba
 uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
 
 # Step 3 — Gold: dim/fact/OBT star schema → PostgreSQL gold_ecommerce
-uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py
+uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode baseline
+uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode optimized
 
 # Step 4 — Features: rolling 90d + 60m aggregations → Feast-ready tables
 uv run python b_schema_pipelines/pipelines/features/feature_customer_90d.py

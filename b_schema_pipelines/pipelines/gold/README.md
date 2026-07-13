@@ -17,15 +17,22 @@ dim_date → dim_payment_method → dim_order_status → dim_product
 → obt_order_performance
 ```
 
-**Surrogate keys are deterministic**, not `monotonically_increasing_id()`:
+**Surrogate keys are deterministic**, not `monotonically_increasing_id()` — same input → same keys every time, so a dimension's key assignment and a fact's lookup of that dimension agree without a round trip. Two interchangeable implementations, picked via `--mode`:
 
-```python
-_assign_surrogate_keys(df, key_col, order_col) = row_number() over Window.orderBy(order_col)
+| Mode | How | Spark cost |
+|---|---|---|
+| `baseline` | `row_number()` over a single unpartitioned `Window.orderBy(order_col)` | One task sorts the *entire* table — `WARN WindowExec: No Partition Defined for Window operation!` |
+| `optimized` (default) | `repartitionByRange` into N globally-ordered partitions → rank locally in parallel → add each partition's running row-count offset | Parallel; the only unpartitioned step sorts one row *per partition*, not per record |
+
+Both produce **identical keys** for the same input (see `test_optimized_surrogate_keys_match_baseline`) — `optimized` is a drop-in replacement, not an approximation.
+
+```bash
+# capture the "before" Spark UI (single-task WindowExec stage)
+uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode baseline
+
+# capture the "after" Spark UI (parallel ranking stages)
+uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode optimized
 ```
-
-Same input → same keys every time, so a dimension's key assignment and a fact's lookup of that dimension agree without a round trip.
-
-> **Known issue:** `Window.orderBy(order_col)` has no `partitionBy`, so Spark runs it in a single task — you'll see `WARN WindowExec: No Partition Defined for Window operation!` on every surrogate-key build. It's the price of a globally sequential, deterministic key. **Possible fix:** rank rows within cheap partitions (e.g. a hash bucket of `order_col`), then add each partition's running row-count offset to make the ranks globally sequential — same deterministic keys, no full-table single-task sort.
 
 - **`dim_customer`** is true **SCD2**: bootstrap run assigns fresh keys to everyone; later runs read the persisted table, close (`is_current=False`, `valid_to_ts=now()`) any row whose `segment`/`country`/`marketing_opt_in` changed, and insert a new current row with a fresh key continuing from `max(existing.customer_key)`. Written with `mode="append"` — history is never overwritten.
 - **`dim_date`** is generated (no source table) for the last `days_history` (180) days ending today.
@@ -97,6 +104,21 @@ Full structured logs are written to `logs/gold/<run_id>.log`. Verify tables land
 SELECT COUNT(*) FROM gold_ecommerce.dim_customer WHERE is_current;
 SELECT COUNT(*) FROM gold_ecommerce.fact_order;
 ```
+
+**Prefer a GUI?** Connect DBeaver:
+
+- Open the DBeaver app (desktop)
+- **Database** tab → **New Database Connection**
+- Choose **PostgreSQL**
+- Enter the connection info:
+  - Host: `localhost`
+  - Port: `5432`
+  - Database: `fsds`
+  - User / password: `fsds` / `fsds`
+- Click **Test Connection**, then **Finish**
+- Browse `gold_ecommerce` → `Tables`, or right-click the schema → **View Diagram** for an ER diagram (SCD2 columns on `dim_customer` included)
+
+![gold_ecommerce ER diagram](../../../assets/gold-schema.png)
 
 ---
 

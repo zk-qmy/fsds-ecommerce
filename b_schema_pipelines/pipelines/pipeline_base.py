@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
@@ -48,8 +49,12 @@ class PipelineBase(ABC):
 
     def _create_spark_session(self, app_name: str) -> SparkSession:
         Path("/tmp/spark-events").mkdir(parents=True, exist_ok=True)
+        # local[*] claims every logical core, which starves other processes
+        # (e.g. vscode-server under WSL2) of CPU and can look like a hung
+        # connection. Leave a couple of cores free for the rest of the machine.
+        n_cores = max(2, (os.cpu_count() or 4) - 2)
         builder = (
-            SparkSession.builder.master("local[*]")
+            SparkSession.builder.master(f"local[{n_cores}]")
             .appName(app_name)
             # Delta Lake extensions
             .config("spark.sql.extensions",
