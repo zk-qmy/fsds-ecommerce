@@ -7,10 +7,11 @@
 # Two independent Python environments live in this image (dags/plan.md §4):
 #   - Airflow's own env (this image's system Python, 3.12) -- runs the DAG
 #     scheduler/webserver/sensors, resolves Connections, orchestrates.
-#   - The project's own env (/opt/project/.venv, Python 3.13, self-managed by uv,
-#     built at container START not image build time -- see docker-compose.yml's
-#     `command:` for the airflow service) -- runs every BashOperator command and
-#     every ExternalPythonOperator's validate_* callable.
+#   - The project's own env (/opt/venvs/project, Python 3.13, self-managed by
+#     uv via UV_PROJECT_ENVIRONMENT, built at container START not image build
+#     time -- see docker-compose.yml's `command:`/`environment:` for the
+#     airflow service) -- runs every BashOperator command and every
+#     ExternalPythonOperator's validate_* callable.
 
 FROM apache/airflow:2.10.5-python3.12
 
@@ -47,15 +48,22 @@ RUN pip install --no-cache-dir \
 # Never used to manage Airflow's own dependencies.
 RUN pip install --no-cache-dir uv
 
-# docker-compose.yml mounts an anonymous volume at exactly /opt/project/.venv,
-# nested under the /opt/project bind mount, so the Linux venv `uv sync` builds
-# at container start doesn't collide with a Windows-native .venv the host repo
-# might have. Docker initializes an anonymous volume's content/ownership from
-# whatever already exists at that path in the image -- without this, it
-# defaults to root:root, and `uv sync` (run as the non-root airflow user below)
-# fails with "Permission denied" trying to create files in it. Pre-creating the
-# directory here, owned by airflow, fixes that -- confirmed by hitting the
-# permission error live and rebuilding with this fix.
+# docker-compose.yml mounts an anonymous volume at /opt/venvs (NOT at
+# /opt/project/.venv itself -- confirmed live that mounting exactly at the
+# venv's own path means `uv sync` can never fully rebuild a stale venv: it can
+# delete files INSIDE a mounted directory but can't rmdir the mountpoint
+# itself ("Device or resource busy"), which is exactly what uv does when an
+# existing venv's Python interpreter no longer resolves, e.g. after an image
+# rebuild). UV_PROJECT_ENVIRONMENT (docker-compose.yml) points the project's
+# own venv at /opt/venvs/project instead -- a plain, freely-recreatable
+# subdirectory of that mount, never the mountpoint itself.
+#
+# Docker initializes an anonymous volume's content/ownership from whatever
+# already exists at that path in the image -- without this, it defaults to
+# root:root, and `uv sync` (run as the non-root airflow user below) fails with
+# "Permission denied" trying to create files in it. Pre-creating the directory
+# here, owned by airflow, fixes that -- confirmed by hitting the permission
+# error live (at the old /opt/project/.venv path) and rebuilding with this fix.
 USER root
-RUN mkdir -p /opt/project/.venv && chown -R airflow:root /opt/project
+RUN mkdir -p /opt/venvs && chown -R airflow:root /opt/venvs
 USER airflow

@@ -29,7 +29,7 @@ from airflow.operators.python import ExternalPythonOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 
 REPO_ROOT_VAR = "{{ var.value.repo_root }}"
-PROJECT_PYTHON = "/opt/project/.venv/bin/python3"
+PROJECT_PYTHON = "/opt/venvs/project/bin/python3"
 POSTGRES_URL = "jdbc:postgresql://postgres:5432/fsds"
 
 default_args = {

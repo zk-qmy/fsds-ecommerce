@@ -42,6 +42,7 @@ Started via `docker compose -f infra/docker-compose.yml up -d`, plus the Spark U
 | PostgreSQL (Gold + features) | `localhost:5432` | 5432 | `fsds` / `fsds` | `gold_ecommerce` schema, DB `fsds` |
 | [Spark UI](http://localhost:4040) | http://localhost:4040 | 4040 | — | Live DAGs/stages — only while a pipeline job is running |
 | [Spark History Server](http://localhost:18080) | http://localhost:18080 | 18080 | — | Completed job UIs — start with `$SPARK_HOME/sbin/start-history-server.sh` |
+| [Airflow webserver](http://localhost:8081) | http://localhost:8081 | 8081→8080 (8080 taken by Trino) | `admin` / `admin` (fixed local-dev login — pre-created before `airflow standalone` starts, see `infra/docker-compose.yml`'s `airflow` service comment) | DP1/DP2/DP3 DAG orchestration — see [`b_schema_pipelines/dags/plan.md`](b_schema_pipelines/dags/plan.md) |
 
 Commented out in `infra/docker-compose.yml` by default (uncomment + `docker compose up -d <service>` to enable):
 
@@ -49,7 +50,6 @@ Commented out in `infra/docker-compose.yml` by default (uncomment + `docker comp
 |---|---|---|
 | Redis | 6379 | Online feature store (Section 04) |
 | MLflow | 5000 | Experiment tracking / model registry (Section 04) |
-| Airflow webserver | 8081→8080 | DAG orchestration UI (Section 02/04) |
 
 **Browsing Postgres with a GUI** — connect [DBeaver](https://dbeaver.io/) (or any PostgreSQL client):
 
@@ -136,6 +136,7 @@ Bronze → Silver → Gold → Feature pipelines. Reads Section 01 outputs, land
 - [`b_schema_pipelines/pipelines/bronze/README.md`](b_schema_pipelines/pipelines/bronze/README.md) — Bronze + Silver run guide
 - [`b_schema_pipelines/pipelines/gold/README.md`](b_schema_pipelines/pipelines/gold/README.md) — Gold run guide
 - [`b_schema_pipelines/dq/README.md`](b_schema_pipelines/dq/README.md) — Great Expectations data-quality suite factories
+- [`b_schema_pipelines/dags/plan.md`](b_schema_pipelines/dags/plan.md) — Airflow DAG design (DP1/DP2/DP3), CI wiring
 
 ### Run
 
@@ -181,6 +182,26 @@ uv run python b_schema_pipelines/pipelines/features/feat_stream_60m.py \
 # Step 5 — Unified: point-in-time (as-of) join of the two feature tables above
 uv run python b_schema_pipelines/pipelines/features/feat_customer_unified.py
 ```
+
+### Orchestration (Airflow)
+
+Steps 1–5 above are also wired into three Airflow DAGs — `dp1_bronze` (ingest → validate),
+`dp2_gold` (Silver → validate → Gold → validate), `dp3_feature` (Flink → both feature jobs in
+parallel → unified → validate), chained via `ExternalTaskSensor`. Full design, task graphs,
+and one-time Connections/Variables setup: [`b_schema_pipelines/dags/plan.md`](b_schema_pipelines/dags/plan.md).
+
+```bash
+# Start Airflow (part of the main compose file — see Local Services & Ports)
+docker compose -f infra/docker-compose.yml up -d airflow
+
+# Airflow UI at http://localhost:8081 — unpause dp1_bronze/dp2_gold/dp3_feature, then trigger
+# dp1_bronze first (the other two wait on it via ExternalTaskSensor)
+```
+
+**Unverified** — this hasn't been run against a live cluster in this repo yet; DAG code and its
+unit/import tests (`tests/dags/test_dags.py`, run via the ephemeral env `dags/plan.md` §13
+documents) are green, but the live `docker compose up` + Airflow UI screenshot the rubric
+scores is still outstanding.
 
 ### Outputs
 
@@ -232,20 +253,22 @@ fsds-ecommerce/
 │   │   ├── streaming/               # flink_stream_pipeline.py + README.md (own Python 3.12 env)
 │   │   ├── common/                 # delta_writer.py
 │   │   └── pipeline_config.yaml    # shared MinIO/Postgres/Delta config
-│   ├── dags/                     # Airflow DAGs (scaffolded)
-│   ├── dq/                       # Great Expectations suites (scaffolded)
+│   ├── dags/                     # Airflow DAGs — dp1_bronze/dp2_gold/dp3_feature + plan.md
+│   ├── dq/                       # Great Expectations suites + validation_runner.py (DAG-facing)
 │   └── docs/                     # 02_schema_piplines.md, 02_spark_optimisation_report.md
 ├── c_drift_labels/               # Section 03 — drift injection + ML labels (scaffolded)
-├── d_ml/                         # Section 04 — ML system (scaffolded)
+├── d_ml/                         # Section 04 — ML system (partially scaffolded, not verified in this pass)
 │   ├── api/                      # FastAPI inference + drift-detection service stubs
 │   ├── design/ pipelines/ src/ cicd/
 ├── infra/
-│   ├── docker-compose.yml        # local dev stack (MinIO, Trino, Postgres)
+│   ├── docker-compose.yml        # local dev stack (MinIO, Trino, Postgres, Airflow)
+│   ├── airflow/                  # Airflow Dockerfile (apache-airflow 2.10.5, own Python 3.12 env)
 │   ├── terraform/                # GKE cluster + VPC + IAM (planned)
 │   └── ansible/                  # CI runner config (planned)
 ├── tests/
 │   ├── a_data_generator/         # Section 01 tests
-│   └── b_schema_pipelines/       # Section 02 tests (Bronze/Silver/Gold/Features)
+│   ├── b_schema_pipelines/       # Section 02 tests (Bronze/Silver/Gold/Features/validation_runner)
+│   └── dags/                     # DAG import/task-graph tests (own ephemeral py3.12/airflow env)
 ├── config/
 │   ├── settings.py
 │   └── logging.py
@@ -277,6 +300,16 @@ git checkout -b feature/<name>
 
 ### CI check before push
 
+Matches [`.github/workflows/ci.yml`](.github/workflows/ci.yml)'s two jobs — run both before pushing:
+
 ```bash
-uv run ruff check . && uv run pytest --cov=d_ml --cov-report=term-missing tests/ -v
+# lint-and-test job
+uv run ruff check . && uv run pytest tests/ -v
+
+# dag-tests job — separate ephemeral env, apache-airflow isn't in the main venv (dags/plan.md §3)
+uv run --no-project --python 3.12 \
+  --with apache-airflow==2.10.5 \
+  --with apache-airflow-providers-postgres==6.4.1 \
+  --with pytest \
+  python3 -m pytest tests/dags/test_dags.py -v
 ```

@@ -26,7 +26,7 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.python import ExternalPythonOperator
 
 REPO_ROOT_VAR = "{{ var.value.repo_root }}"
-PROJECT_PYTHON = "/opt/project/.venv/bin/python3"
+PROJECT_PYTHON = "/opt/venvs/project/bin/python3"
 
 default_args = {
     "retries": 3,
@@ -39,7 +39,7 @@ default_args = {
 def _validate_bronze(minio_cfg: dict) -> None:
     # Deferred import: Airflow's own environment doesn't have great_expectations,
     # deltalake, or psycopg2 installed (dags/plan.md §4) — only this callable's
-    # target interpreter (/opt/project/.venv) does. Importing at DAG module scope
+    # target interpreter (/opt/venvs/project) does. Importing at DAG module scope
     # would break DAG parsing in Airflow's own process.
     from b_schema_pipelines.dq.validation_runner import validate_bronze_tables
 

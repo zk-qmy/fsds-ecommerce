@@ -5,12 +5,16 @@ Great Expectations suite **factories** for the checks documented in
 `bronze_suite.py`, `silver_suite.py`, `gold_suite.py`. Each factory builds and returns an
 in-memory `ExpectationSuite` for one table — it does not read Spark/Delta/Postgres itself,
 and it does not run the checks. That's deliberate: the same factory is reused by unit tests
-(no cluster needed) and, eventually, by an Airflow `GreatExpectationsOperator` task that
-supplies the real row counts / dimension keys and actually validates a batch.
+(no cluster needed) and by `validation_runner.py`, which supplies the real row counts /
+dimension keys and actually validates a batch.
 
-**Not built yet:** the `GreatExpectationsOperator` wiring in `dp1_bronze_dag` /
-`dp2_gold_dag` — that's `pipelines/features/README.md` §10 (Airflow DAGs), which needs
-this package but hasn't started. See "What's still open" below.
+**Built:** `validation_runner.py` (this directory) is the DAG-facing entry point that calls
+these factories — **not** an Airflow `GreatExpectationsOperator`, which this repo doesn't use
+(see `dags/plan.md` §3/§12 for why: the ephemeral, parameter-injected suite factories here
+don't map onto that provider's persisted-checkpoint model without standing up a full GX
+project first). Instead, each DAG's `validate_*` task is an `ExternalPythonOperator` running
+`validation_runner.validate_{bronze,silver,gold,feature}_tables(...)` in the project's own
+Python 3.13 venv. Full design in [`dags/plan.md`](../dags/plan.md) §9/§10.
 
 ---
 
@@ -27,7 +31,9 @@ bronze_suite.py / silver_suite.py / gold_suite.py    ← one *_expectation_suite
         │
 ExpectationSuite  (in memory — not persisted, not validated)
         │
-        ▼  (future — §10) GreatExpectationsOperator task validates it against a real batch
+        ▼  validation_runner.py's `_validate_suite` — builds a batch-only ephemeral GX
+        │  context and validates it for real (see dags/plan.md §15 for the resolved
+        │  GX API friction this hit during implementation)
    pass → next DAG stage runs
    fail → task fails, downstream stages blocked
 ```
@@ -153,15 +159,16 @@ $ uv run pytest tests/b_schema_pipelines/test_bronze_suite.py tests/b_schema_pip
 
 ## What's still open
 
-- **DAG wiring** (`pipelines/features/README.md` §10) — no `GreatExpectationsOperator` task
-  calls these factories yet. That task also owns computing the runtime inputs: reading the
-  previous run's baseline row count, collecting a dimension's distinct key set for
-  `fk_checks`, and filtering `dim_customer` to `is_current` before validating `unique_column`.
-- **DataHub assertions** (`pipelines/features/README.md` §11) — once §10 runs a checkpoint,
-  linking its pass/fail result to a DataHub assertion is separate work.
-- **Live validation evidence** — everything above is proven by construction (unit tests
-  assert the right expectations exist with the right parameters), not by actually running a
-  suite against a real Bronze/Silver/Gold batch. That proof only exists once §10 wires a
-  checkpoint against live data — same reasoning as why `pipelines/features/README.md` treats
-  "passes a mocked unit test" and "verified against a real running stack" as different
-  claims, and doesn't conflate them.
+- **DataHub assertions** (`pipelines/features/README.md` §11) — linking a validation run's
+  pass/fail result to a DataHub assertion is separate, not-yet-started work (Data Governance
+  rubric section, distinct from this Data Pipeline Orchestration section).
+- **Live validation evidence against the real docker-compose stack** — `validation_runner.py`'s
+  logic is proven by construction: unit tests assert the right expectations exist with the
+  right parameters (`tests/b_schema_pipelines/test_validation_runner.py`, mocked
+  psycopg2/deltalake I/O + real, non-mocked GX validation on small fixtures — 22 tests
+  passing), and the three DAGs' task graphs are proven via `tests/dags/test_dags.py` (11
+  tests, run in the ephemeral `--no-project --python 3.12 --with apache-airflow` env — see
+  that file's docstring). Neither replaces actually running `airflow dags test <dag_id>
+  <date>` against the live `docker compose up` stack and a real Bronze/Silver/Gold batch —
+  that live run, and the Airflow UI screenshot the rubric scores, are still open
+  (**Unverified** in this repo as of this writing).

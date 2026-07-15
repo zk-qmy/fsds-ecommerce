@@ -27,7 +27,7 @@ from airflow.operators.python import ExternalPythonOperator
 from airflow.sensors.external_task import ExternalTaskSensor
 
 REPO_ROOT_VAR = "{{ var.value.repo_root }}"
-PROJECT_PYTHON = "/opt/project/.venv/bin/python3"
+PROJECT_PYTHON = "/opt/venvs/project/bin/python3"
 FLINK_CLEAN_EVENTS_DIR = "b_schema_pipelines/streaming_data/flink_clean_events/optimized"
 POSTGRES_URL = "jdbc:postgresql://postgres:5432/fsds"
 

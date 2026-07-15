@@ -104,10 +104,9 @@ JSON line embedded at DEBUG level, and every other job in this repo logs `status
 PyFlink code as if it lived inside `feat_stream_60m.py` (a Spark job). It's fixed now:
 `pipelines/streaming/flink_stream_pipeline.py` (§8) owns Problems D/E/F for real, and
 `feat_stream_60m.py` (§6) only computes the 4 feature aggregates from whatever clean event
-stream it's pointed at. **Still TODO:** `02_spark_optimisation_report.md`'s Fix D/E/F code
-blocks still say `feat_stream_60m.py` in their comments — repoint them at
-`streaming/flink_stream_pipeline.py`'s actual method names
-(`_apply_dedup`/`_apply_watermark_strategy`/`_build_env`) next time that doc is touched.
+stream it's pointed at. **Repointing done:** `02_spark_optimisation_report.md`'s Fix D/E/F
+code blocks now say `flink_stream_pipeline.py` throughout — verified by reading the file
+directly, not assumed from this note.
 
 ---
 
@@ -379,8 +378,8 @@ the port is documented as adjustable, not hardcoded as a hard requirement). See
 section for the reasoning (mirrors why Fix 1's AQE skew-join config has no dedicated test
 either: there's no behavior here that isn't already proven by actually running the job).
 
-**Still TODO:** `docs/02_spark_optimisation_report.md`'s Fix D/E/F code blocks still say
-`feat_stream_60m.py` — repoint them at this file next time that doc is touched (§2).
+**Repointing done** (§2): `docs/02_spark_optimisation_report.md`'s Fix D/E/F code blocks now
+say `flink_stream_pipeline.py`, not `feat_stream_60m.py`.
 
 ---
 
@@ -410,82 +409,65 @@ requires an active data context (it checks whether the suite has been persisted)
 shared `dq/common.py` helper (`new_suite(name)`) that backs each factory with an ephemeral,
 in-memory context, rather than duplicating that boilerplate three times.
 
-**Still open:** wiring these into `GreatExpectationsOperator` tasks and computing their
-runtime inputs (baseline row counts, FK valid-key sets, the `is_current`-filtered batch for
-`dim_customer`'s uniqueness check) is §10 Airflow DAGs' job, not this one's.
+**Done (§10):** wiring these into DAG validate tasks and computing their runtime inputs
+(baseline row counts, FK valid-key sets, the `is_current`-filtered batch for `dim_customer`'s
+uniqueness check) is `dq/validation_runner.py`'s job — not a `GreatExpectationsOperator` (see
+§10 and `dags/plan.md` §3/§9 for why that provider wasn't used).
 
 ```python
 # dq/bronze_suite.py — Great Expectations suite factory
-def bronze_expectation_suite(table: str, expected_columns: list[str], pk_column: str) -> ExpectationSuite:
-    """Schema-present + null-PK checks, used by dp1_bronze_dag's validate task."""
+def bronze_expectation_suite(table: str, expected_columns: list[str]) -> ExpectationSuite:
+    """Schema-presence check, called by validation_runner.validate_bronze_tables
+    (dp1_bronze's validate_bronze task)."""
 ```
 
 One suite factory per layer (`bronze_suite.py`, `silver_suite.py`, `gold_suite.py`), each
-producing a GE `ExpectationSuite` consumed by a `GreatExpectationsOperator` task in the
-matching DAG (§10). Silver's suite additionally encodes the Problem A/B/C checks already
-documented in `docs/02_schema_piplines.md` §5's table (skew ±5pp, zero NULLs post-fill,
-~2% dedup rate). Gold's suite adds referential-integrity checks (fact FK exists in dim) and
-the SCD2 invariant (`is_current` uniqueness per `customer_id`).
-
-**`great_expectations` needs adding to `pyproject.toml`** — root-level file, ask first.
+producing a GE `ExpectationSuite` consumed by `validation_runner.py`'s `validate_*_tables`
+functions (§10), called from each DAG's `validate_*` `ExternalPythonOperator` task. Silver's
+suite additionally encodes the Problem A/B/C checks already documented in
+`docs/02_schema_piplines.md` §5's table (skew ±5pp, zero NULLs post-fill, ~2% dedup rate).
+Gold's suite adds referential-integrity checks (fact FK exists in dim) and the SCD2 invariant
+(`is_current` uniqueness per `customer_id`).
 
 ---
 
-## 10. Airflow DAGs (`b_schema_pipelines/dags/`) — NEW, IMPLEMENTATION_GUIDE 1.8; rubrics.md: 12 pts (DP1 4 + DP2 4 + DP3 4)
+## 10. Airflow DAGs (`b_schema_pipelines/dags/`) — ✅ done, IMPLEMENTATION_GUIDE 1.8; rubrics.md: 12 pts (DP1 4 + DP2 4 + DP3 4)
 
-Three DAGs, matching `docs/02_schema_piplines.md`'s already-documented schedule
-(`dp1_bronze_dag` 00:00 → `dp2_gold_dag` 01:00/02:00 → `dp3_feature_dag` 02:30). Excludes
-`materialize_dag` (Feast, out of scope — §3).
+**Superseded by [`dags/plan.md`](../../dags/plan.md) — read that file, not the sketch that used
+to be here.** This section originally sketched `GreatExpectationsOperator` +
+`SparkSubmitOperator` as placeholders; the actual, implemented design differs in both respects
+and is documented in full in `dags/plan.md` (§3–§11), which is kept in sync with the shipped
+code. Summary, not a duplicate of that file's detail:
 
-**`dp3_feature_dag` runs all three feature jobs** — `rubrics.md`'s DP3 line item literally
-only describes "Pipeline to compute offline feature table" (example:
-`f_customer_total_orders_90d`), which would technically be satisfied by `feat_customer_90d.py`
-alone. This was narrowed to that literal scope in an earlier pass, then reverted per your
-instruction — DP3 bundles all three feature jobs (matches `CLAUDE.md`'s architecture, and
-`feat_stream_60m.py`/`feat_customer_unified.py` need to run somewhere in the orchestrated
-pipeline eventually regardless of how this one rubric line is scored).
+- Three DAGs — `dp1_bronze`, `dp2_gold` (Silver + Gold, one DAG per the rubric's "bronze ->
+  silver and gold zone (or bronze -> gold only)" allowance), `dp3_feature` (runs all three
+  feature jobs, not just `feat_customer_90d.py`) — chained via `ExternalTaskSensor`, matching
+  `docs/02_schema_piplines.md`'s schedule (00:00 → 01:00 → 02:30). Excludes `materialize_dag`
+  (Feast, out of scope — §3).
+- **Ingest/transform tasks are `BashOperator`** wrapping the exact `uv run python3 <script>.py`
+  command each pipeline's own README already documents (no `SparkSubmitOperator` — there's no
+  `spark-submit` binary or cluster manager anywhere in this repo, only a local `local[*]`
+  session per `pipeline_base.py`).
+- **Validate tasks are `ExternalPythonOperator`**, not `GreatExpectationsOperator` — they call
+  `b_schema_pipelines.dq.validation_runner.validate_{bronze,silver,gold,feature}_tables(...)`
+  in the project's own Python 3.13 venv (Airflow's own process runs Python 3.12 and doesn't
+  have `great_expectations`/`deltalake`/`psycopg2` installed). Full reasoning in `dags/plan.md`
+  §3/§4/§9/§12.
+- Connections/Variables, not hardcoded: `repo_root` (Variable), `fsds_postgres`/`fsds_minio`
+  (Connections) — set once via `airflow variables set`/`airflow connections add`, per
+  `dags/plan.md` §10.
+- Retry policy: 3 retries, exponential backoff (30s/60s/120s), per `CLAUDE.md`.
+- Tested: `tests/dags/test_dags.py` (11 tests — DAG import, task-graph shape, retry policy,
+  schedule) and `tests/b_schema_pipelines/test_validation_runner.py` (22 tests). Both green;
+  see `dags/plan.md` §13 for how to run the DAG tests (they need a separate ephemeral
+  `--python 3.12 --with apache-airflow` env, now wired into CI as the `dag-tests` job).
 
-**Operator choice — deviates from `IMPLEMENTATION_GUIDE.md`'s `SparkSubmitOperator` template
-deliberately:** every pipeline job in this repo runs as `uv run python3 <script>.py` against a
-local `local[*]` Spark session (see `pipeline_base.py`) — there is no `spark-submit` binary,
-cluster manager, or `SparkSubmitOperator` connection configured anywhere in this repo.
-Using `BashOperator` wrapping the exact same `uv run python3 ...` command each README already
-documents keeps the DAGs truthful to how the pipelines actually run. Document this as an
-explicit trade-off in the DAG docstrings (mirrors `CLAUDE.md`'s instruction: "design decisions
-must be explicit with trade-offs documented").
+**`infra/docker-compose.yml`'s `airflow` service is uncommented and live** (webserver at
+`http://localhost:8081`) — done, no longer pending.
 
-```python
-# dags/dp1_bronze_dag.py — skeleton
-with DAG(
-    "dp1_bronze",
-    schedule="0 0 * * *",
-    default_args={"retries": 3, "retry_delay": timedelta(seconds=30)},  # exponential backoff per CLAUDE.md
-    catchup=False,
-) as dag:
-    ingest = BashOperator(
-        task_id="ingest_bronze",
-        bash_command="cd {{ var.value.repo_root }} && uv run python3 b_schema_pipelines/pipelines/bronze/ingest_bronze.py",
-    )
-    validate = GreatExpectationsOperator(
-        task_id="validate_bronze",
-        checkpoint_name="bronze_checkpoint",
-    )
-    ingest >> validate
-```
-
-- **Connections/Variables, not hardcoded** (`CLAUDE.md` requirement): `repo_root`,
-  `postgres_conn_id`, `minio_conn_id` come from Airflow Variables/Connections, set once via
-  `airflow variables set` / the Connections UI — never literal paths/credentials in the DAG
-  files.
-- `dp2_gold_dag.py`: `transform_silver.py --mode optimized` → `build_gold.py` → validate (Silver
-  + Gold suites).
-- `dp3_feature_dag.py`: `flink_stream_pipeline.py --mode optimized` → `feat_customer_90d.py` +
-  `feat_stream_60m.py` (parallel) → `feat_customer_unified.py` → validate.
-- Retry policy: 3 retries, exponential backoff (30s/60s/120s) per `CLAUDE.md`.
-
-**Airflow needs uncommenting in `infra/docker-compose.yml`** — root-level file, ask first.
-Once running, DAGs load via the existing (commented-out) volume mount
-`../b_schema_pipelines/dags:/opt/airflow/dags`.
+**Still open:** an actual `airflow dags test <dag_id> <date>` run against this live stack, and
+the Airflow UI screenshot the rubric scores, haven't been captured yet (**Unverified**) —
+that's the one gap between "code done and unit-tested" and "graded evidence exists."
 
 ---
 
@@ -571,16 +553,16 @@ GUI-only step — nothing left to automate.
 §4  Storage optimization            ← ✅ code done (Z-order + Postgres indexes); evidence capture
                                        (`DESCRIBE HISTORY`, `EXPLAIN ANALYZE` before/after) still open
 §12 Trino Bronze/Silver visualization ← ✅ done (tables registered + verified; DBeaver screenshot still manual)
-§9  dq/ GE suites                   ← ✅ done (suite factories only — wiring is §10's job)
-§10 Airflow DAGs                    ← needs §5, §6, §7, §8, §9 all done — all done, ready to start
+§9  dq/ GE suites                   ← ✅ done (suite factories + validation_runner.py wiring)
+§10 Airflow DAGs                    ← ✅ done — see dags/plan.md; live-stack run + UI screenshot still open
 §11 DataHub lineage                 ← needs §5–§8 done (emits from each job) — all done, ready to start
 ```
 
 **Full feature pipeline chain (bronze → silver → gold → features → unified) is now complete
-and tested end to end.** Remaining Section 02 work is orchestration/governance/optimization,
-not more Spark jobs: §4's evidence capture, §10 (Airflow — `dp3_feature_dag` runs all three
-feature jobs), §11 (DataHub). §12 (Trino visualization) is code-complete; only the DBeaver
-screenshot itself remains, a manual GUI step.
+and tested end to end, and §10's three Airflow DAGs orchestrate all of it.** Remaining Section
+02 work is evidence capture and governance, not more code: §4's evidence capture, §10's live
+`airflow dags test` run + UI screenshot, §11 (DataHub — not started). §12 (Trino visualization)
+is code-complete; only the DBeaver screenshot itself remains, a manual GUI step.
 
 ## 14. Approval checklist — files outside `b_schema_pipelines/`
 
@@ -590,7 +572,9 @@ phase is reached:
 | File | Why it needs to change | Which phase | Status |
 |---|---|---|---|
 | `pyproject.toml` | add `apache-flink`, `great-expectations`, `acryl-datahub` | §8, §9, §11 | `apache-flink` sidestepped entirely (§8 runs in an isolated ephemeral env, never touched this file — see §8); `great-expectations>=1.19.0` ✅ done, approved (§9); `acryl-datahub` still pending |
-| `infra/docker-compose.yml` | uncomment `airflow` service; add `datahub` service block | §10, §11 | pending |
+| `infra/docker-compose.yml` | uncomment `airflow` service; add `datahub` service block | §10, §11 | `airflow` service ✅ done, approved (webserver at `localhost:8081`, `network_mode` not used — bridge networking, see `dags/plan.md` §4); `datahub` service block still pending |
+| `infra/airflow/Dockerfile` | new file — Airflow 2.10.5 image + `uv`-managed project venv | §10 | ✅ done, approved — see `dags/plan.md` §4 |
+| `.github/workflows/ci.yml` | new `dag-tests` job running `tests/dags/test_dags.py` in an ephemeral py3.12/airflow env | §10 (post-implementation review) | ✅ done, approved — was written but never wired into CI (silently import-skipped) until this fix |
 | `infra/trino/catalog/delta.properties` | add `delta.register-table-procedure.enabled=true` | §12 | ✅ done, approved — one line, Trino container restarted to pick it up |
 | `CLAUDE.md` | optionally add `pipelines/streaming/` and `dq/` suite filenames to the repo-structure tree (currently silent on exact `dq/` contents and doesn't show `streaming/` at all) | any time, cosmetic only | not done |
 
@@ -599,7 +583,7 @@ phase is reached:
 - [ ] §4 — `DESCRIBE HISTORY` before/after Z-order; `EXPLAIN ANALYZE` seq-scan → index-scan
 - [ ] §5/§6/§7 — all xfail markers removed, full test suite green, `pytest --cov` unaffected elsewhere
 - [ ] §8 — Flink UI screenshots: backpressure HIGH→OK, `numLateRecordsDropped` >0→0, dedup query >0→0, windowed aggregation output
-- [ ] §9/§10 — Airflow UI green run screenshot for `dp1_bronze_dag`, `dp2_gold_dag`, `dp3_feature_dag`, each showing the validate task
+- [ ] §9/§10 — Airflow UI green run screenshot for `dp1_bronze`, `dp2_gold`, `dp3_feature`, each showing the validate task (DAG code + unit tests are done and green; this live-cluster screenshot is the only remaining piece — **Unverified**, no live run captured yet)
 - [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL) tables all visible — tables are registered and queryable now, screenshot is the only remaining step
 - [ ] §11 — DataHub lineage graph screenshot per pipeline; assertions-passing screenshot; browse view across Bronze/Silver/Gold/Feature zones
 - [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL) tables all visible

@@ -138,5 +138,7 @@ Great Expectations suites for Gold's null-PK/uniqueness/referential-integrity/vo
 live in [`b_schema_pipelines/dq/gold_suite.py`](../../dq/README.md), not here — `_create_indexes()`
 above is a storage optimization, not a quality gate. `gold_suite.py`'s `fk_checks` param needs
 each dimension's distinct surrogate-key set (e.g. every `dim_customer.customer_key`), and its
-`unique_column` check on `dim_customer` needs the `is_current`-filtered batch — both collected
-by whichever caller validates the suite (`dp2_gold_dag`'s validate task, not yet built).
+`unique_column` check on `dim_customer` needs the `is_current`-filtered batch — both are
+collected by [`dq/validation_runner.py`](../../dq/validation_runner.py)'s
+`validate_gold_tables`, which `dp2_gold_dag`'s `validate_gold` task calls. See
+[`dags/plan.md`](../../dags/plan.md) §7/§9 for the full DAG + validation design.

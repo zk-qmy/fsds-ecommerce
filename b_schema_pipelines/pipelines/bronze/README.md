@@ -4,6 +4,11 @@ Reads raw source files from `a_data_generator/outputs/` and writes them as Delta
 
 **Tables ingested:** `customers`, `products`, `orders`, `order_items`, `payments`, `events`
 
+**Orchestration:** both pipelines below run standalone via `uv run python3 ...` for local
+dev/testing (steps 1–3 below), and are also wired into Airflow — Bronze as `dp1_bronze`'s
+`ingest_bronze` task, Silver as `dp2_gold`'s `transform_silver` task, each followed by a
+`validate_*` task. See [`dags/plan.md`](../../dags/plan.md) for the full DAG design.
+
 ---
 
 ## Architecture

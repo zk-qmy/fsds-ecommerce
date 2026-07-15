@@ -117,33 +117,47 @@ infra/airflow/Dockerfile
     Airflow's own dependencies, only to bootstrap the project's separate venv below)
 
   + at container start (not build time — see "why a bind mount" below):
-      uv sync --frozen --project /opt/project   ← creates /opt/project/.venv (Python 3.13,
-                                                    self-managed by uv, decoupled from the
-                                                    image's system Python entirely)
+      uv sync --frozen   ← creates /opt/venvs/project (Python 3.13, self-managed
+                            by uv via UV_PROJECT_ENVIRONMENT, decoupled from the
+                            image's system Python entirely)
 ```
 
 - **Why a bind mount, not `COPY . .`:** `infra/docker-compose.yml`'s existing (unused)
-  `spark` service already established this pattern — `volumes: [ "..:/opt/project", "/opt/project/.venv" ]`
-  (the second entry is an anonymous volume that shadows the mount at exactly `.venv/`, so a
-  Linux venv built inside the container is never clobbered by a Windows-native `.venv` the
-  host might have, and vice versa). Reusing it means DAG/pipeline code edits on the host are
-  picked up without rebuilding the image — the same fast local-dev loop every other pipeline
-  in this repo already has.
-- **Why `network_mode: host`:** every existing pipeline script's config
-  (`pipeline_config.yaml`'s `postgres.host: localhost` / `minio.endpoint: http://localhost:9000`,
-  `build_gold.py`'s `postgres_url` default) is hardcoded to `localhost`. Host networking makes
-  `localhost` inside the Airflow container resolve to the same `postgres`/`minio`/`trino`
-  containers every other README already tells you to reach at `localhost:5432` /
-  `localhost:9000` — zero changes to any existing script or config file. This is
-  Linux-only (fine — WSL2 is Linux; would need revisiting for a real multi-host deployment,
-  but `infra/docker-compose.yml` is explicitly local-dev-only per CLAUDE.md).
+  `spark` service already established this pattern — `volumes: [ "..:/opt/project", ... ]`.
+  Reusing it means DAG/pipeline code edits on the host are picked up without rebuilding the
+  image — the same fast local-dev loop every other pipeline in this repo already has.
+- **Why the project venv lives at `/opt/venvs/project`, not `/opt/project/.venv`
+  (post-implementation fix):** the first implementation mounted an anonymous volume at exactly
+  `/opt/project/.venv`, matching the `spark` service's pattern (shadows the mount so a Linux
+  venv built in-container is never clobbered by a Windows-native `.venv` the host might have).
+  This broke live: anonymous volumes persist across container recreations, and when `uv sync`
+  later decided that persisted venv's Python interpreter was stale and needed a full rebuild,
+  it could delete every file *inside* `/opt/project/.venv` but not `rmdir` the directory itself
+  (it's the volume's mountpoint) — `Device or resource busy`, and (via an unrelated `|| true`
+  bug in the `command:` chain at the time) this failure was silently swallowed rather than
+  surfaced. Fix: `UV_PROJECT_ENVIRONMENT=/opt/venvs/project` relocates the venv to a plain,
+  freely-recreatable subdirectory of a volume mounted one level up (`/opt/venvs`), never the
+  mountpoint itself — same Windows/Linux isolation property, no rmdir collision possible.
+  `PROJECT_PYTHON` in all three DAG files and the Dockerfile's ownership pre-seed step were
+  updated to match.
+- **Why not `network_mode: host` (post-implementation correction):** this section originally
+  proposed host networking so every pipeline script's `localhost`-hardcoded config
+  (`pipeline_config.yaml`'s `postgres.host`/`minio.endpoint`, `build_gold.py`'s `postgres_url`
+  default) would resolve correctly with zero changes. Confirmed live this doesn't work: Docker
+  Desktop doesn't support `network_mode: host` without an opt-in GUI feature (off by default).
+  Actual implementation uses standard bridge networking instead, reaching sibling containers by
+  service hostname (`postgres`, `minio`) — `pipeline_base.py` reads a `MINIO_ENDPOINT` env var
+  override (falls back to `pipeline_config.yaml`'s `localhost` default when unset, so every
+  other, non-Airflow way of running these scripts is unaffected), and Postgres URLs are passed
+  explicitly via each script's own `--postgres-url` CLI flag in the DAG files rather than
+  relying on any implicit `localhost` resolution.
 
 ### How a task actually runs
 
 | Task type | Runs as | Which Python | How it reaches project code |
 |---|---|---|---|
-| Ingest/transform/build/feature (`ingest_bronze.py`, `transform_silver.py`, `build_gold.py`, `feat_*.py`, `flink_stream_pipeline.py`) | `BashOperator` | `/opt/project/.venv` (3.13) | `cd {{ var.value.repo_root }} && uv run python3 <script>.py <args>` — identical to what every pipeline's own README already documents; Airflow never imports this code |
-| Validate (all three DAGs) | `ExternalPythonOperator` | `/opt/project/.venv/bin/python3` (3.13) — **not** Airflow's own 3.12 interpreter | Airflow's DAG-parsing code (3.12) resolves the Postgres/MinIO Airflow Connection into plain values, then hands them as `op_kwargs` to a callable in `b_schema_pipelines.dq.validation_runner`, executed via cloudpickle in the target venv (built-in Airflow 2.4+ mechanism, no new framework) |
+| Ingest/transform/build/feature (`ingest_bronze.py`, `transform_silver.py`, `build_gold.py`, `feat_*.py`, `flink_stream_pipeline.py`) | `BashOperator` | `/opt/venvs/project` (3.13) | `cd {{ var.value.repo_root }} && uv run python3 <script>.py <args>` — identical to what every pipeline's own README already documents; Airflow never imports this code |
+| Validate (all three DAGs) | `ExternalPythonOperator` | `/opt/venvs/project/bin/python3` (3.13) — **not** Airflow's own 3.12 interpreter | Airflow's DAG-parsing code (3.12) resolves the Postgres/MinIO Airflow Connection into plain values, then hands them as `op_kwargs` to a callable in `b_schema_pipelines.dq.validation_runner`, executed via cloudpickle in the target venv (built-in Airflow 2.4+ mechanism, no new framework) |
 | Cross-DAG wait (`dp2`→`dp1`, `dp3`→`dp2`) | `ExternalTaskSensor` | Airflow's own 3.12 env | Core Airflow sensor — reads Airflow's own metadata DB, no project code involved |
 
 This keeps the property every other part of this repo already has: **Airflow orchestrates;
@@ -431,7 +445,7 @@ backoff — no custom retry code).
 
 | Test | What it proves | Why only this one (not more) |
 |---|---|---|
-| `airflow dags test dp1_bronze <date>` (or `dp2_gold`, `dp3_feature`) against the real local docker-compose stack, run manually/in CI after `docker compose up`, asserting the run exits 0 and the expected Bronze/Silver/Gold/feature row counts land | Proves the whole chain — Docker image, both Python environments, the Connections, the actual `deltalake`/`psycopg2` reads inside `validation_runner.py` — works together, not just in isolation. Every piece above is mocked in its unit test; this is the only place that catches an environment-wiring bug (e.g. a Connection misconfigured, `network_mode: host` not actually resolving `localhost` the way §4 assumes). | This mirrors `pipelines/features/README.md`'s own stated philosophy: "verified against a real running stack... not just passing unit tests" caught two real bugs unit tests missed. One live end-to-end run per DAG (three total) is enough to catch an environment problem — running it more than once per DAG doesn't buy additional confidence, since the failure mode this test exists to catch is "the whole chain is wired wrong," not per-branch logic (unit tests already cover that). |
+| `airflow dags test dp1_bronze <date>` (or `dp2_gold`, `dp3_feature`) against the real local docker-compose stack, run manually/in CI after `docker compose up`, asserting the run exits 0 and the expected Bronze/Silver/Gold/feature row counts land | Proves the whole chain — Docker image, both Python environments, the Connections, the actual `deltalake`/`psycopg2` reads inside `validation_runner.py` — works together, not just in isolation. Every piece above is mocked in its unit test; this is the only place that catches an environment-wiring bug (e.g. a Connection misconfigured, or `MINIO_ENDPOINT`/`--postgres-url` not actually resolving the sibling `minio`/`postgres` containers the way §4 assumes). | This mirrors `pipelines/features/README.md`'s own stated philosophy: "verified against a real running stack... not just passing unit tests" caught two real bugs unit tests missed. One live end-to-end run per DAG (three total) is enough to catch an environment problem — running it more than once per DAG doesn't buy additional confidence, since the failure mode this test exists to catch is "the whole chain is wired wrong," not per-branch logic (unit tests already cover that). |
 | A deliberately-broken-input run of `dp1_bronze` (e.g. point `--source-dir` at a Parquet file missing a required column) asserting `validate_bronze` fails and `dp2_gold`'s `wait_for_bronze` sensor times out rather than proceeding | Proves the actual gate behavior the rubric's "Validate stage" line item is scored on — that a bad upstream table blocks downstream, not just that a validate task exists and always passes | This is the other half of "prove the gate works," and it's cheap to add once the happy-path e2e test above already stands up the stack — not a second full environment test, just a different input to the same harness. |
 
 **Not proposed:** a full pytest-coverage/mutation-testing gate on the new DAG/validation
@@ -470,7 +484,7 @@ touching):
 | File | Change | Needs approval |
 |---|---|---|
 | `infra/airflow/Dockerfile` | new file | yes — new root-level infra file |
-| `infra/docker-compose.yml` | uncomment + rewrite the `airflow` service (image build, `network_mode: host`, bind mounts, env) | yes — root-level file |
+| `infra/docker-compose.yml` | uncomment + rewrite the `airflow` service (image build, bridge networking + `MINIO_ENDPOINT`/`--postgres-url` overrides, bind mounts, env) | yes — root-level file |
 | `b_schema_pipelines/dags/*.py` | new files | no — inside `b_schema_pipelines/` |
 | `b_schema_pipelines/dq/validation_runner.py` | new file | no — inside `b_schema_pipelines/` |
 | `pyproject.toml` / `uv.lock` | **no change** | n/a — Airflow and its providers live only in `infra/airflow/Dockerfile`, per §3 |

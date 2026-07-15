@@ -6,8 +6,8 @@ at" column) — Bronze is a faithful, untransformed copy of the source, so
 null-PK / uniqueness / volume checks with meaningful thresholds only make
 sense once Silver/Gold have applied their fixes. `ingest_bronze.py`'s own
 `_check_quality` already blocks a bad ingest before the Delta commit; this
-suite is the data contract `dp1_bronze_dag`'s `GreatExpectationsOperator`
-validates against (see pipelines/features/README.md §9/§10).
+suite is the data contract `dp1_bronze_dag`'s `validate_bronze` task validates
+against, via `validation_runner.validate_bronze_tables` (see dags/plan.md §9).
 """
 
 from __future__ import annotations

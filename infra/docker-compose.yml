@@ -189,21 +189,54 @@ services:
       # never looks in the right place.
       AIRFLOW__CORE__DAGS_FOLDER:                  /opt/project/b_schema_pipelines/dags
       MINIO_ENDPOINT:                              http://minio:9000
+      # Fixed local-dev login instead of `airflow standalone`'s randomly
+      # generated one-time password -- see the `command:` below for how.
+      _AIRFLOW_WWW_USER_USERNAME:                  admin
+      _AIRFLOW_WWW_USER_PASSWORD:                  admin
+      # Relocates the project's own venv OUT of the /opt/project bind mount --
+      # see the /opt/venvs volume comment below for why. dags/*.py's
+      # PROJECT_PYTHON constant and this path must be kept in sync.
+      UV_PROJECT_ENVIRONMENT:                       /opt/venvs/project
     volumes:
       # Live source mount, not COPY -- DAG/pipeline code edits on the host are
       # picked up without rebuilding the image, matching the (unused) `spark`
       # service's documented pattern above.
       - ..:/opt/project
-      # Anonymous volume shadowing exactly .venv/ -- stops a Windows-native
-      # .venv the host might have from colliding with the Linux venv this
-      # container builds at startup below.
-      - /opt/project/.venv
+      # Anonymous volume at the PARENT directory, not at .venv itself --
+      # confirmed live that mounting exactly at /opt/project/.venv makes `uv
+      # sync` unable to rebuild a stale venv: it can delete everything INSIDE
+      # a mounted directory but can't rmdir the mountpoint itself ("Device or
+      # resource busy"), and uv does exactly that rmdir when an existing venv's
+      # Python interpreter no longer resolves (e.g. after an image rebuild).
+      # Mounting one level up means UV_PROJECT_ENVIRONMENT's target
+      # (/opt/venvs/project) is a plain, freely-recreatable subdirectory, never
+      # a mountpoint -- and still isolates the Linux venv from a Windows-native
+      # one the host repo's own .venv/ might have, same as before.
+      - /opt/venvs
       - airflow_logs:/opt/airflow/logs
     # uv sync builds/refreshes the project's own Python 3.13 venv from the
     # bind-mounted pyproject.toml/uv.lock on every container start (cheap when
     # already up to date), then hands off to Airflow's normal entrypoint.
+    #
+    # `airflow db migrate` + `airflow users create` run before `standalone` so
+    # the admin/admin login above is fixed rather than the random one-time
+    # password `standalone` normally generates and writes to
+    # standalone_admin_password.txt -- `standalone` only auto-creates its own
+    # user when none exists yet, so pre-creating one here makes that step a
+    # no-op. The `create` call is grouped with a `reset-password` fallback
+    # (not a bare `|| true`) so a user left over from an earlier run gets its
+    # password reset to the fixed one too, instead of silently keeping
+    # whatever password it already had -- confirmed live: an earlier revision
+    # of this file used an ungrouped `|| true` here, which (via bash's
+    # left-to-right && / || chaining) also silently swallowed an unrelated
+    # `uv sync --frozen` failure earlier in the same chain.
+    # Verified live: admin/admin logs in successfully (scripted login POST to
+    # /login/, followed the redirect to /home, confirmed no login form).
     command: >
-      bash -c "cd /opt/project && uv sync --frozen && exec airflow standalone"
+      bash -c "cd /opt/project && uv sync --frozen && \
+      airflow db migrate && \
+      (airflow users create --username $${_AIRFLOW_WWW_USER_USERNAME} --password $${_AIRFLOW_WWW_USER_PASSWORD} --firstname Admin --lastname User --role Admin --email admin@example.com || airflow users reset-password --username $${_AIRFLOW_WWW_USER_USERNAME} --password $${_AIRFLOW_WWW_USER_PASSWORD}) && \
+      exec airflow standalone"
 
 volumes:
   minio_storage:
