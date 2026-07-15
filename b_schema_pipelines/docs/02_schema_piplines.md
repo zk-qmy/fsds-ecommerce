@@ -444,9 +444,15 @@ All Gold and feature tables ready by 03:30. Scoring job starts at 04:00. Retrain
 #### Monitoring and Alerting
 
 * All pipeline jobs log structured JSON to stdout → collected by Loki (90-day retention).
-* Airflow sends email alert on any task failure.
+* Airflow sends email alert on any task failure. **Design only — not implemented in the
+  current DAGs** (`dags/plan.md` §12: needs SMTP configuration in `infra/docker-compose.yml`'s
+  airflow service, out of scope for the current plan and not required by any rubric line).
 * Great Expectations checkpoint failures post to Slack via `SlackNotificationAction`.
+  **Design only — not implemented** (`dags/plan.md` §12, same reasoning as
+  `pipelines/features/README.md` §9's earlier scoping decision).
 * DataHub emits lineage assertions per pipeline; failed assertions visible in DataHub UI.
+  **Not started** — separate rubric section (Data Governance), tracked in
+  `pipelines/features/README.md` §11.
 
 #### Run Metadata
 

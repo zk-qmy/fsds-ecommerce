@@ -13,3 +13,18 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest --cov=src tests/ -v
 
+  dag-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # apache-airflow needs Python 3.12 (b_schema_pipelines/dags/plan.md §3) and is
+      # deliberately not in the main project's uv.lock (§3) — run it in its own
+      # ephemeral env, exactly as tests/dags/test_dags.py's own docstring documents.
+      - run: |
+          uv run --no-project --python 3.12 \
+            --with apache-airflow==2.10.5 \
+            --with apache-airflow-providers-postgres==6.4.1 \
+            --with pytest \
+            python3 -m pytest tests/dags/test_dags.py -v
+

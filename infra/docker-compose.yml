@@ -154,28 +154,60 @@ services:
   #       --host 0.0.0.0
   #       --port 5000
 
-  # # ── Pipeline orchestration ─────────────────────────────────────────────────
+  # ── Pipeline orchestration ─────────────────────────────────────────────────
 
-  # airflow:
-  #   image: apache/airflow:2.8.0
-  #   container_name: fsds-airflow
-  #   depends_on:
-  #     - postgres
-  #   environment:
-  #     AIRFLOW__CORE__EXECUTOR:                    LocalExecutor
-  #     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:        postgresql+psycopg2://fsds:fsds@postgres:5432/fsds
-  #     AIRFLOW__CORE__LOAD_EXAMPLES:               "false"
-  #     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
-  #   ports:
-  #     - "8081:8080"   # Airflow web UI — http://localhost:8081 (8080 taken by Trino)
-  #   volumes:
-  #     - ../b_schema_pipelines/dags:/opt/airflow/dags
-  #     - airflow_logs:/opt/airflow/logs
-  #   command: standalone
+  airflow:
+    build:
+      context: ..
+      dockerfile: infra/airflow/Dockerfile
+    container_name: fsds-airflow
+    # Standard bridge networking, not network_mode: host -- confirmed live that
+    # host networking doesn't work under Docker Desktop without an opt-in GUI
+    # feature (Settings > Resources > Network > Enable host networking, off by
+    # default; `docker info` showed Experimental: false here). Reaches sibling
+    # containers by service hostname instead (postgres, minio — same pattern
+    # hive-metastore already uses above for S3_ENDPOINT). pipeline_config.yaml's
+    # `minio.endpoint` is overridden via MINIO_ENDPOINT below
+    # (pipeline_base.py); Postgres URLs are passed explicitly via each script's
+    # own `--postgres-url` CLI flag in the DAG files, and the fsds_postgres/
+    # fsds_minio Airflow Connections (dags/plan.md §10) point at postgres/minio
+    # too — nothing here relies on "localhost" meaning anything but this
+    # container's own loopback.
+    depends_on:
+      - postgres
+      - minio
+    ports:
+      - "8081:8080"   # Airflow web UI — http://localhost:8081 (8080 taken by Trino)
+    environment:
+      AIRFLOW__CORE__EXECUTOR:                    LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:        postgresql+psycopg2://fsds:fsds@postgres:5432/fsds
+      AIRFLOW__CORE__LOAD_EXAMPLES:               "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # Default dags_folder is ~/airflow/dags -- doesn't exist anywhere in the
+      # /opt/project bind mount. Confirmed live: without this, `airflow dags
+      # list` reports "No data found", not an import error -- Airflow simply
+      # never looks in the right place.
+      AIRFLOW__CORE__DAGS_FOLDER:                  /opt/project/b_schema_pipelines/dags
+      MINIO_ENDPOINT:                              http://minio:9000
+    volumes:
+      # Live source mount, not COPY -- DAG/pipeline code edits on the host are
+      # picked up without rebuilding the image, matching the (unused) `spark`
+      # service's documented pattern above.
+      - ..:/opt/project
+      # Anonymous volume shadowing exactly .venv/ -- stops a Windows-native
+      # .venv the host might have from colliding with the Linux venv this
+      # container builds at startup below.
+      - /opt/project/.venv
+      - airflow_logs:/opt/airflow/logs
+    # uv sync builds/refreshes the project's own Python 3.13 venv from the
+    # bind-mounted pyproject.toml/uv.lock on every container start (cheap when
+    # already up to date), then hands off to Airflow's normal entrypoint.
+    command: >
+      bash -c "cd /opt/project && uv sync --frozen && exec airflow standalone"
 
 volumes:
   minio_storage:
   postgres_data:
   # redis_data:
-  # airflow_logs:
+  airflow_logs:
   #spark_ivy_cache:

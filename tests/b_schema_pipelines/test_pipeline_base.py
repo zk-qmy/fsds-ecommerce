@@ -116,6 +116,25 @@ def test_resolve_s3_config_unknown_layer_raises(pipeline):
         pipeline._resolve_s3_config("platinum")
 
 
+def test_minio_endpoint_env_var_overrides_yaml_default(monkeypatch):
+    """Lets the same unmodified pipeline scripts run inside the Airflow
+    container, where "localhost" doesn't reach the sibling minio container —
+    docker-compose sets this for the airflow service only (dags/plan.md §4)."""
+    monkeypatch.setenv("MINIO_ENDPOINT", "http://minio:9000")
+    pipeline = ConcretePipeline()
+    assert pipeline.shared_cfg["minio"]["endpoint"] == "http://minio:9000"
+
+
+def test_minio_endpoint_falls_back_to_yaml_default_when_env_var_unset(monkeypatch):
+    from b_schema_pipelines.pipelines.utils.config import load_config
+
+    monkeypatch.delenv("MINIO_ENDPOINT", raising=False)
+    yaml_default = load_config(PipelineBase._SHARED_CONFIG)["minio"]["endpoint"]
+
+    pipeline = ConcretePipeline()
+    assert pipeline.shared_cfg["minio"]["endpoint"] == yaml_default
+
+
 # ── 6. log_run — level routing (drives Grafana/Loki alerting) ────────────────
 
 

@@ -37,6 +37,15 @@ class PipelineBase(ABC):
         )
 
         self.shared_cfg: dict = load_config(self._SHARED_CONFIG)
+        # MINIO_ENDPOINT overrides pipeline_config.yaml's minio.endpoint when set —
+        # falls back to the YAML value (localhost, for host-native runs) otherwise.
+        # Needed so the same unmodified scripts can run inside the Airflow
+        # container, where "localhost" doesn't reach the sibling minio container —
+        # docker-compose sets this to http://minio:9000 for the airflow service
+        # only (dags/plan.md §4).
+        minio_endpoint = os.environ.get("MINIO_ENDPOINT")
+        if minio_endpoint:
+            self.shared_cfg["minio"]["endpoint"] = minio_endpoint
         self.cfg: dict = load_config(config_file) if config_file else {}
         self.logger.info("Starting spark...")
         self.spark = self._create_spark_session(app_name=self.run_id)

@@ -551,9 +551,15 @@ class GoldBuilder(PipelineBase):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["baseline", "optimized"], default="optimized")
+    # Matches feat_customer_90d.py/feat_stream_60m.py/feat_customer_unified.py's
+    # existing --postgres-url flag — build_gold.py was the one script in this
+    # family that only took it as a constructor param, not a CLI flag, which
+    # became a real gap once the Airflow DAG (dags/plan.md §7) needed to point
+    # it at a service hostname instead of localhost.
+    parser.add_argument("--postgres-url", default="jdbc:postgresql://localhost:5432/fsds")
     args = parser.parse_args()
 
-    GoldBuilder(mode=args.mode).run()
+    GoldBuilder(mode=args.mode, postgres_url=args.postgres_url).run()
 
 
 if __name__ == "__main__":
