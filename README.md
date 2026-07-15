@@ -135,6 +135,7 @@ Bronze → Silver → Gold → Feature pipelines. Reads Section 01 outputs, land
 - [`b_schema_pipelines/docs/02_spark_optimisation_report.md`](b_schema_pipelines/docs/02_spark_optimisation_report.md) — Spark optimisation before/after
 - [`b_schema_pipelines/pipelines/bronze/README.md`](b_schema_pipelines/pipelines/bronze/README.md) — Bronze + Silver run guide
 - [`b_schema_pipelines/pipelines/gold/README.md`](b_schema_pipelines/pipelines/gold/README.md) — Gold run guide
+- [`b_schema_pipelines/dq/README.md`](b_schema_pipelines/dq/README.md) — Great Expectations data-quality suite factories
 
 ### Run
 

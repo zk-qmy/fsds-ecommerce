@@ -32,4 +32,5 @@ dependencies = [
     "ruff>=0.15.15",
     "scikit-learn>=1.9.0",
     "uvicorn>=0.48.0",
+    "great-expectations>=1.19.0",
 ]

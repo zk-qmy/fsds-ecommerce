@@ -384,12 +384,35 @@ either: there's no behavior here that isn't already proven by actually running t
 
 ---
 
-## 9. Data quality gates (`b_schema_pipelines/dq/`) — NEW, part of IMPLEMENTATION_GUIDE 1.8's 12 pts
+## 9. Data quality gates (`b_schema_pipelines/dq/`) — ✅ suite factories implemented, part of IMPLEMENTATION_GUIDE 1.8's 12 pts
 
 Scope: **basic quality gates only** (schema check, null-PK check, uniqueness, referential
 integrity, volume ±30%) — this is a base Airflow DAG requirement (`CLAUDE.md`'s
 "Quality gates" section, and `docs/02_schema_piplines.md` §5's table), independent of the
 Slack-alerting novel idea, which is explicitly excluded from this plan (§3).
+
+**See [`b_schema_pipelines/dq/README.md`](../../dq/README.md) for the full implementation
+writeup** (architecture, per-layer check table, the two-expectation skew-band trick, GX 1.x
+context deviation, constants reference). Summary below.
+
+**Implemented:** `bronze_suite.py` (schema check only — Bronze's `_check_quality` already
+gates null-PKs inline, and the design doc's §5 table scopes null-PK/volume/skew/dedup checks
+to Silver+Gold, not Bronze), `silver_suite.py` (schema + null-PK + volume + orders'
+Problem A/B checks + order_items' Problem C dedup check), `gold_suite.py` (schema + null-PK +
+uniqueness + referential-integrity + volume). All three are pure suite-construction functions
+— no Spark/Postgres access of their own, row-count baselines and FK valid-key sets are passed
+in by the caller — so they're unit-tested (28 tests, `test_bronze_suite.py`/
+`test_silver_suite.py`/`test_gold_suite.py`) without a live cluster. `great-expectations`
+added to `pyproject.toml` (approved — resolves cleanly on Python 3.13, v1.19.0).
+
+**Deviation from the plan's original sketch:** GX 1.x's `ExpectationSuite.add_expectation()`
+requires an active data context (it checks whether the suite has been persisted) — added a
+shared `dq/common.py` helper (`new_suite(name)`) that backs each factory with an ephemeral,
+in-memory context, rather than duplicating that boilerplate three times.
+
+**Still open:** wiring these into `GreatExpectationsOperator` tasks and computing their
+runtime inputs (baseline row counts, FK valid-key sets, the `is_current`-filtered batch for
+`dim_customer`'s uniqueness check) is §10 Airflow DAGs' job, not this one's.
 
 ```python
 # dq/bronze_suite.py — Great Expectations suite factory
@@ -545,18 +568,19 @@ GUI-only step — nothing left to automate.
 §8  Flink streaming pipeline        ← ✅ done
 §6  feat_stream_60m.py              ← ✅ done (default source is still raw events.json — see §6)
 §7  feat_customer_unified.py        ← ✅ done (as-of join, not equi-join — see §7)
-§4  Storage optimization            ← needs Gold (already exists) — can run anytime, ready to start
+§4  Storage optimization            ← ✅ code done (Z-order + Postgres indexes); evidence capture
+                                       (`DESCRIBE HISTORY`, `EXPLAIN ANALYZE` before/after) still open
 §12 Trino Bronze/Silver visualization ← ✅ done (tables registered + verified; DBeaver screenshot still manual)
-§9  dq/ GE suites                   ← needs nothing new, but is consumed by §10
-§10 Airflow DAGs                    ← needs §5, §6, §7, §8, §9 all done — §5/§6/§7/§8 done, only §9 left
+§9  dq/ GE suites                   ← ✅ done (suite factories only — wiring is §10's job)
+§10 Airflow DAGs                    ← needs §5, §6, §7, §8, §9 all done — all done, ready to start
 §11 DataHub lineage                 ← needs §5–§8 done (emits from each job) — all done, ready to start
 ```
 
 **Full feature pipeline chain (bronze → silver → gold → features → unified) is now complete
 and tested end to end.** Remaining Section 02 work is orchestration/governance/optimization,
-not more Spark jobs: §4 (storage), §9 (data quality), §10 (Airflow — `dp3_feature_dag` runs
-all three feature jobs), §11 (DataHub). §12 (Trino visualization) is code-complete; only the
-DBeaver screenshot itself remains, a manual GUI step.
+not more Spark jobs: §4's evidence capture, §10 (Airflow — `dp3_feature_dag` runs all three
+feature jobs), §11 (DataHub). §12 (Trino visualization) is code-complete; only the DBeaver
+screenshot itself remains, a manual GUI step.
 
 ## 14. Approval checklist — files outside `b_schema_pipelines/`
 
@@ -565,7 +589,7 @@ phase is reached:
 
 | File | Why it needs to change | Which phase | Status |
 |---|---|---|---|
-| `pyproject.toml` | add `apache-flink`, `great-expectations`, `acryl-datahub` | §8, §9, §11 | `apache-flink` sidestepped entirely (§8 runs in an isolated ephemeral env, never touched this file — see §8); `great-expectations`/`acryl-datahub` still pending |
+| `pyproject.toml` | add `apache-flink`, `great-expectations`, `acryl-datahub` | §8, §9, §11 | `apache-flink` sidestepped entirely (§8 runs in an isolated ephemeral env, never touched this file — see §8); `great-expectations>=1.19.0` ✅ done, approved (§9); `acryl-datahub` still pending |
 | `infra/docker-compose.yml` | uncomment `airflow` service; add `datahub` service block | §10, §11 | pending |
 | `infra/trino/catalog/delta.properties` | add `delta.register-table-procedure.enabled=true` | §12 | ✅ done, approved — one line, Trino container restarted to pick it up |
 | `CLAUDE.md` | optionally add `pipelines/streaming/` and `dq/` suite filenames to the repo-structure tree (currently silent on exact `dq/` contents and doesn't show `streaming/` at all) | any time, cosmetic only | not done |

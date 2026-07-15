@@ -129,3 +129,14 @@ uv run pytest tests/b_schema_pipelines/test_build_gold.py -v
 ```
 
 JDBC reads/writes are mocked; tests validate the DataFrame shape and SCD2/aggregation logic (31 tests, see the file docstring).
+
+---
+
+## Data quality
+
+Great Expectations suites for Gold's null-PK/uniqueness/referential-integrity/volume checks
+live in [`b_schema_pipelines/dq/gold_suite.py`](../../dq/README.md), not here — `_create_indexes()`
+above is a storage optimization, not a quality gate. `gold_suite.py`'s `fk_checks` param needs
+each dimension's distinct surrogate-key set (e.g. every `dim_customer.customer_key`), and its
+`unique_column` check on `dim_customer` needs the `is_current`-filtered batch — both collected
+by whichever caller validates the suite (`dp2_gold_dag`'s validate task, not yet built).
