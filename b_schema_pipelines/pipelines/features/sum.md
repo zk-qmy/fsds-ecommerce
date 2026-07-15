@@ -1,24 +1,23 @@
-# Feature Pipelines — Summary
+# Feature Pipelines — Run Guide
 
-Reads Gold tables from PostgreSQL and computes ML-ready feature tables, written back to
-PostgreSQL under `gold_ecommerce`, ready for Feast ingestion (Section 04, out of scope here).
+Reads Gold tables (and the Flink-cleaned event stream) from PostgreSQL/local disk, computes
+ML-ready feature tables, and writes them back to PostgreSQL under `gold_ecommerce`, ready for
+Feast ingestion (Section 04, out of scope here).
 
-**Status:** `feat_customer_90d.py` is implemented and tested. `feat_stream_60m.py` and
-`feat_customer_unified.py` are not yet built — see `README.md` in this directory (§6, §7) for
-the plan.
+**Design rationale for all three jobs (window logic, idempotency, null-fill rules, the as-of
+join) lives in `README.md` §5/§6/§7 — this doc is the operational counterpart: prerequisites,
+run commands, and how to verify output.** Status/what's still open in Section 02 is also
+tracked there, not duplicated here.
+
+**Run order:** Gold → (`feat_customer_90d.py`, Flink pipeline → `feat_stream_60m.py` in
+parallel) → `feat_customer_unified.py`.
 
 ---
 
 ## `feat_customer_90d.py` — rolling 90-day offline features
 
-**Run Gold first** — this reads `gold_ecommerce.{dim_customer, dim_date, dim_product,
-fact_order, fact_order_item, fact_payment_attempt}` via JDBC, the same PostgreSQL instance
-`build_gold.py` writes to.
-
-### How it's implemented
-
-`CustomerFeature90d` computes, for one `snapshot_date`, the 4 features documented in
-`docs/02_schema_piplines.md` §6:
+**Prerequisite:** Gold built (`build_gold.py`) — reads `gold_ecommerce.{dim_customer, dim_date,
+dim_product, fact_order, fact_order_item, fact_payment_attempt}` via JDBC.
 
 | Feature | Logic |
 |---|---|
@@ -26,41 +25,6 @@ fact_order, fact_order_item, fact_payment_attempt}` via JDBC, the same PostgreSQ
 | `f_customer_avg_order_value_90d` | `AVG(order_net_amount)` per customer, orders in the window |
 | `f_customer_distinct_categories_90d` | `COUNT(DISTINCT category)` via `fact_order → fact_order_item → dim_product` |
 | `f_customer_payment_fail_rate_90d` | `SUM(is_payment_failed) / COUNT(*)` via `fact_order → fact_payment_attempt` |
-
-**Window.** `fact_order` is joined to a `dim_date` slice pre-filtered to
-`calendar_date ∈ (snapshot_date − 90d, snapshot_date]`, joining on `date_key` rather than
-comparing `order_date_key` as a raw integer. This makes point-in-time correctness structural:
-an order dated after `snapshot_date`, or outside the 90-day window, simply has no matching row
-in that filtered `dim_date` slice and is dropped by the inner join — there's no separate
-"exclude future orders" branch to get wrong.
-
-**Customers with zero orders in the window** still get a feature row (left-joined from
-`dim_customer`, current rows only): counts and the fail rate default to `0`, but
-`f_customer_avg_order_value_90d` is left `NULL` — the average of an empty set is undefined, and
-coalescing it to `0` would misrepresent "no orders" as "orders averaging $0".
-
-**Idempotent write.** `_write()` deletes any existing rows for `snapshot_date` via a direct
-`psycopg2` connection (Spark's JDBC `DataFrameWriter` can append or overwrite a whole table,
-but can't run a `DELETE ... WHERE`), then appends the new rows via Spark JDBC. The delete is a
-no-op (logged, not raised) on a cold start where the table doesn't exist yet.
-
-**Spark session lifecycle.** Unlike `build_gold.py`, `run()` does **not** call
-`self.spark.stop()`. This job is meant to be re-invoked per `snapshot_date` (daily run,
-backfill loop, or an Airflow task) — the caller owns the session's lifecycle, not the job.
-
----
-
-## Prerequisites
-
-- Gold tables built: `uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py`
-- PostgreSQL reachable at `jdbc:postgresql://localhost:5432/fsds` (see `gold/README.md` for
-  how to start/verify it) — credentials come from `pipeline_config.yaml`'s `postgres:` block
-- `feat_customer_90d` table doesn't need to be pre-created — Spark's JDBC writer creates it on
-  first write
-
----
-
-## Running
 
 ```bash
 cd /mnt/d/fsds-ecommerce
@@ -74,39 +38,77 @@ uv run python3 b_schema_pipelines/pipelines/features/feat_customer_90d.py \
     --snapshot-date 2026-06-01
 ```
 
-## Expected output
-
-Structured log lines to stdout, e.g.:
-
+```bash
+uv run pytest tests/b_schema_pipelines/test_feat_customer_90d.py -v   # 12 tests
 ```
-[feat_customer_90d] phase=end  status=ok  rows_in=120000  rows_out=120000  duration_s=4.812
-```
-
-`rows_out` equals the current `dim_customer` row count — every active customer gets a feature
-row for the snapshot, whether or not they ordered in the window (see "zero orders" note above).
-
-Full structured logs are written to `logs/feat_90d/<run_id>.log` (same convention as
-`bronze/README.md` and `gold/README.md`).
-
-Verify via `psql` or DBeaver:
-
-```sql
-SELECT * FROM gold_ecommerce.feat_customer_90d
-WHERE event_timestamp = '2026-06-01'
-LIMIT 10;
-```
-
-Re-running the same `--snapshot-date` overwrites that date's rows in place (delete-then-insert)
-— row count for that date stays constant across repeated runs.
 
 ---
 
-## Tests
+## `feat_stream_60m.py` — 60-minute streaming session features
+
+**Prerequisite:** Flink pipeline run first (`pipelines/streaming/flink_stream_pipeline.py`,
+`streaming/README.md`) for the production source; falls back to raw `events.json` for local
+dev without Flink running.
+
+| Feature | Logic |
+|---|---|
+| `f_stream_views_30m` | COUNT(`view` events) in the first 30 min of the window |
+| `f_stream_add_to_cart_30m` | COUNT(`add_to_cart` events) in the first 30 min |
+| `f_stream_cart_to_purchase_ratio_60m` | `purchase` count / `add_to_cart` count over the full window (0 if no add-to-carts) |
+| `f_stream_burst_activity_flag` | 1 if any event in the window fell inside a burst window (12:00–12:20 or 20:00–20:20) |
 
 ```bash
-uv run pytest tests/b_schema_pipelines/test_feat_customer_90d.py -v
+# Default source: raw events.json (local dev, no Flink required)
+uv run python3 b_schema_pipelines/pipelines/features/feat_stream_60m.py
+
+# Production source: Flink's cleaned/deduped/watermark-corrected output
+uv run python3 b_schema_pipelines/pipelines/features/feat_stream_60m.py \
+    --events-source b_schema_pipelines/streaming_data/flink_clean_events/optimized
 ```
 
-JDBC reads/writes are mocked; tests validate the feature computation logic (window filtering,
-point-in-time correctness, null-fill rules) and the idempotent-write/`run()` call order
-(12 tests — see the file docstring).
+```bash
+uv run pytest tests/b_schema_pipelines/test_feat_stream_60m.py -v   # 16 tests
+```
+
+---
+
+## `feat_customer_unified.py` — point-in-time join of the above two
+
+**Prerequisite:** both `feat_customer_90d.py` and `feat_stream_60m.py` have written their
+tables. As-of join design fully documented in `README.md` §7 (not repeated here) — the short
+version: `feat_customer_90d` (daily) and `feat_stream_60m` (hourly) sit on different time
+grains, so this is a latest-value-as-of join, not an equi-join.
+
+```bash
+uv run python3 b_schema_pipelines/pipelines/features/feat_customer_unified.py
+```
+
+```bash
+uv run pytest tests/b_schema_pipelines/test_feat_customer_unified.py -v   # 8 tests
+```
+
+---
+
+## Shared operational notes (all three jobs)
+
+- **Spark session lifecycle.** None of the three call `self.spark.stop()` in `run()` (unlike
+  `build_gold.py`) — each is re-invokable in the same process, the caller owns the session.
+- **Idempotent writes.** Every job deletes the rows it's about to re-write via `psycopg2`
+  before appending via Spark JDBC, so re-running for the same date/window never duplicates rows.
+  Each `_delete_existing_*` method also runs `SET TIME ZONE <spark session tz>` on the psycopg2
+  connection before the DELETE — PySpark collects timestamps as naive datetimes in the Spark
+  session's local timezone, and without this, Postgres compares them using the connection's own
+  default timezone instead, silently matching zero rows and turning every re-run into a
+  duplicate-append. Found via live verification against real Postgres (not caught by any unit
+  test, since they all mock the DB layer) — confirmed with a live before/after: same job run
+  twice against the same snapshot produced 2x rows before the fix, exactly 1x after.
+- **Logs.** `logs/<PREFIX>/<run_id>.log` — same convention as `bronze/README.md` and
+  `gold/README.md`.
+
+## Verify output
+
+```sql
+SELECT * FROM gold_ecommerce.feat_customer_90d      WHERE event_timestamp = '2026-06-01' LIMIT 10;
+SELECT * FROM gold_ecommerce.feat_stream_60m         ORDER BY event_timestamp DESC LIMIT 10;
+SELECT * FROM gold_ecommerce.feat_customer_unified   ORDER BY event_timestamp DESC LIMIT 10;
+```

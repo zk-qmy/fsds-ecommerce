@@ -329,7 +329,19 @@ If the same (`customer_id`, `event_timestamp`) pair is written twice (e.g. pipel
 |---|---|---|
 | `feat_customer_90d` | Offline (PostgreSQL) | Daily at 02:30 via `dp3_feature_dag` |
 | `feat_stream_60m` | Offline (PostgreSQL) + Online (Redis) | Daily push via `push_stream_to_feast.py` |
+| `feat_customer_unified` | Offline (PostgreSQL) | After both of the above, same `dp3_feature_dag` run |
 | Online store | Redis | Materialised daily at 03:00 via `materialize_dag` |
+
+---
+
+## Feature Table: feat_customer_unified
+
+* **Purpose:** Single feature view combining offline (90-day) and streaming (60-minute) signal per customer, for Section 03's `training_table.py` to join against `ml_customer_label` and for real-time scoring.
+* **Grain:** One row per (`customer_id`, `event_timestamp`) — **follows `feat_stream_60m`'s grain**, not `feat_customer_90d`'s. The two source tables sit on different time grains (`feat_customer_90d` is one row per customer per *day*, midnight-stamped; `feat_stream_60m` is one row per customer per 60-minute *window*, stamped at the window start) — an equi-join on `event_timestamp` between them would only match when a stream window happened to start at exactly midnight on a snapshot day, i.e. almost never. This table's grain deliberately follows the finer-grained side.
+* **Primary Key:** (`customer_id`, `event_timestamp`)
+* **Join type:** As-of join, not an equi-join. For each `feat_stream_60m` row, attach the *latest* `feat_customer_90d` row at or before that row's `event_timestamp`, per customer — implemented as a ranked window (`Window.partitionBy(customer_id, event_timestamp).orderBy(offline_event_timestamp.desc())`, keep rank 1) over a left join with the range condition `offline.event_timestamp <= stream.event_timestamp`. This is the same `f.event_timestamp <= l.event_timestamp` point-in-time rule this doc already states for features-to-labels joins, applied here between two feature tables instead.
+* **Null-fill rule:** a stream row with no applicable offline snapshot yet (new customer, or a window before that customer's first snapshot) gets the offline count/rate features defaulted to `0`, but `f_customer_avg_order_value_90d` stays `NULL` — the average of zero orders is undefined, not zero. Same rule `feat_customer_90d` already applies to its own zero-order customers; this table just reaches the same NULL/zero split via a missing as-of match instead of a zero-row aggregation.
+* **Deduplication Policy:** same DELETE-then-INSERT-via-psycopg2 pattern as `feat_stream_60m`, keyed on the distinct `event_timestamp` values present in each write batch.
 
 ---
 
@@ -392,6 +404,17 @@ dim_date → dim_payment_method → dim_order_status → dim_product
 | Silver | Delta Lake | MinIO `s3://silver/` | GCS `gs://fsds-silver/` |
 | Gold | PostgreSQL 15 | `localhost:5432/fsds` | Cloud SQL (asia-southeast1) |
 | Features | PostgreSQL 15 | `localhost:5432/fsds` | Cloud SQL (asia-southeast1) |
+
+### Cross-Zone Visualization (DBeaver)
+
+Gold is browsable in DBeaver directly (PostgreSQL connection — `gold/README.md`). Bronze and
+Silver are Delta Lake tables on MinIO, not a database DBeaver can connect to on their own —
+they're exposed via Trino's Delta Lake connector (`infra/trino/catalog/delta.properties`,
+`delta` catalog, `bronze`/`silver` schemas), registered with
+`CALL delta.system.register_table(...)` (`b_schema_pipelines/docs/register_bronze_silver_trino.sql`).
+Add a second DBeaver connection using the **Trino** driver (`localhost:8080`, no auth) to
+browse `delta.bronze.*` / `delta.silver.*` alongside the `gold_ecommerce` PostgreSQL
+connection — all three zones visible across the two connections.
 
 ### Pipeline Dependencies
 

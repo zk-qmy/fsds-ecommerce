@@ -168,7 +168,17 @@ uv run python3 b_schema_pipelines/pipelines/gold/build_gold.py --mode optimized
 
 # Step 4 — Features: rolling 90d + 60m aggregations → Feast-ready tables
 uv run python b_schema_pipelines/pipelines/features/feat_customer_90d.py
-uv run python b_schema_pipelines/pipelines/features/feat_stream_60m.py
+
+# Step 4b — Flink: cleans/dedupes/watermarks the event stream (own Python 3.12 env —
+# see b_schema_pipelines/pipelines/streaming/README.md)
+uv run --no-project --python 3.12 --with apache-flink python3 \
+b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode optimized
+
+uv run python b_schema_pipelines/pipelines/features/feat_stream_60m.py \
+    --events-source b_schema_pipelines/streaming_data/flink_clean_events/optimized
+
+# Step 5 — Unified: point-in-time (as-of) join of the two feature tables above
+uv run python b_schema_pipelines/pipelines/features/feat_customer_unified.py
 ```
 
 ### Outputs
@@ -178,8 +188,9 @@ uv run python b_schema_pipelines/pipelines/features/feat_stream_60m.py
 | Bronze | Delta Lake | `s3a://bronze-data/bronze/<table>/` on MinIO |
 | Silver | Delta Lake | `s3a://silver-data/silver/<table>/` on MinIO |
 | Gold | PostgreSQL | `gold_ecommerce.{dim_*, fact_*, obt_order_performance}` |
-| Features | PostgreSQL | `feat_customer_90d`, `feat_stream_60m` |
-| Logs | Text | `logs/{bronze,silver,gold}/<run_id>.log` |
+| Features | PostgreSQL | `feat_customer_90d`, `feat_stream_60m`, `feat_customer_unified` |
+| Flink clean stream | NDJSON | `b_schema_pipelines/streaming_data/flink_clean_events/<mode>/` (local disk) |
+| Logs | Text | `logs/{bronze,silver,gold,feat_90d,feat_60m,feat_unified}/<run_id>.log` |
 
 See [Local Services & Ports](#local-services--ports) for MinIO/Postgres/Spark UI access.
 
@@ -212,7 +223,8 @@ fsds-ecommerce/
 │   │   ├── bronze/               # ingest_bronze.py + README.md
 │   │   ├── silver/                # transform_silver.py
 │   │   ├── gold/                    # build_gold.py + README.md
-│   │   ├── features/              # feat_customer_90d.py, feat_stream_60m.py
+│   │   ├── features/              # feat_customer_90d.py, feat_stream_60m.py, feat_customer_unified.py, sum.md
+│   │   ├── streaming/               # flink_stream_pipeline.py + README.md (own Python 3.12 env)
 │   │   ├── common/                 # delta_writer.py
 │   │   └── pipeline_config.yaml    # shared MinIO/Postgres/Delta config
 │   ├── dags/                     # Airflow DAGs (scaffolded)

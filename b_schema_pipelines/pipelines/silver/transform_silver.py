@@ -62,9 +62,10 @@ class SilverTransformer(PipelineBase):
     # private: spark
 
     def _build_spark(self):
-        # Fix 1 — AQE skew join handles Problem A (85% Ho Chi Minh City partition skew)
-        # self.spark.conf.set("spark.sql.adaptive.enabled", "true")
-        # self.spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+        # Fix 1 (AQE skew join, Problem A) is mode-dependent, not session-wide —
+        # set explicitly in _run_baseline (disabled) / _run_optimized (enabled)
+        # so the two modes actually differ in the Spark UI instead of both
+        # silently getting Spark's own default (on since 3.2).
         return self.spark
 
     # ── private: readers / writers
@@ -100,7 +101,12 @@ class SilverTransformer(PipelineBase):
         PURPOSE: Capture Spark UI "before" screenshots:
             Stages tab — skewed task durations on orders (Problem A: 85% HCMC)
             SQL tab    — SortMergeJoin for the products join (no broadcast hint)
+
+        Explicitly disables AQE skew-join handling — Spark 3.2+ enables it by
+        default, which would silently fix the skew and hide the "before"
+        symptom this mode exists to capture.
         """
+        self.spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "false")
         for table in SILVER_TABLES:
             start_ts = datetime.now()
             df = self._read_bronze(table)
@@ -156,6 +162,12 @@ class SilverTransformer(PipelineBase):
 
     def _run_optimized(self) -> None:
         """Apply all four fixes in sequence."""
+        # Fix 1 — AQE skew join handles Problem A (85% Ho Chi Minh City partition
+        # skew). Set explicitly (not relied upon as Spark's default) so this
+        # mode is verifiably different from _run_baseline's explicit disable.
+        self.spark.conf.set("spark.sql.adaptive.enabled", "true")
+        self.spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+
         # Fix 2 — schema evolution: fill NULL coupon_code / shipping_method.
         # Cache Bronze so rows_in count, fix transform, and _write_silver all
         # share one S3A scan instead of three.
@@ -181,7 +193,8 @@ class SilverTransformer(PipelineBase):
             "order_items", items_start, datetime.now(), items_rows_in, rows_out, "ok"
         )
 
-        # Fix 1 (AQE skewJoin) is passive — active via _build_spark config above.
+        # Fix 1 (AQE skewJoin) is passive — enabled via the spark.conf.set calls
+        # at the top of this method, applies to every stage below/above it.
         # Fix 4 (_fix_broadcast_join) is a Spark-plan demonstration — call it standalone
         # against order_items + products to capture Spark UI SQL tab screenshot.
 

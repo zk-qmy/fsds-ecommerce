@@ -15,6 +15,12 @@ python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
 
 Spark UI live: http://localhost:4040 (while job runs)
 Spark History Server: http://localhost:18080 (after job finishes)
+---
+| Layer  | Purpose                  | Data Quality              | Common Operations                             | Typical Spark Bottlenecks                                        |
+| ------ | ------------------------ | ------------------------- | --------------------------------------------- | ---------------------------------------------------------------- |
+| Bronze | Raw ingestion            | Raw, unvalidated          | Read files, schema inference, append          | Small files, schema evolution, ingestion throughput              |
+| Silver | Clean & standardized     | Validated and transformed | Joins, deduplication, filtering, aggregations | Data skew, shuffle, joins, partitioning                          |
+| Gold   | Business-ready analytics | Curated                   | Aggregations, KPI calculations, star schemas  | High-cardinality aggregations, large shuffles, expensive groupBy |
 
 ---
 
@@ -41,10 +47,18 @@ Screenshot to capture: **Stages tab → task duration histogram showing one outl
 ### Fix in code
 
 ```python
-# pipeline_base.py — applied before any Silver session starts
-spark.conf.set("spark.sql.adaptive.enabled", "true")
-spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+# transform_silver.py — SilverTransformer._run_optimized(), first two lines
+self.spark.conf.set("spark.sql.adaptive.enabled", "true")
+self.spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
 ```
+
+Set explicitly per-mode, not left to Spark's own default (AQE and skew-join handling are both
+on by default since Spark 3.2) — `_run_baseline()` explicitly sets
+`skewJoin.enabled = "false"` first, so the "before" symptom in this fix is actually
+reproducible instead of being silently fixed by Spark regardless of mode. (This correction
+replaces an earlier version of this doc that claimed the config lived in `pipeline_base.py` —
+it never did; the lines existed, commented out, in `transform_silver.py`, and neither mode
+touched them.)
 
 AQE detects at runtime that one partition is larger than
 `spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes` (default 256 MB) and
@@ -216,15 +230,23 @@ Screenshot to capture: **SQL DAG showing BroadcastHashJoin with zero Exchange on
 
 ## Flink Fixes (Problems D / E / F)
 
-These are observed in the **Flink Web UI** at http://localhost:8081, not the Spark UI.
+Implemented in `b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py`
+(`FlinkStreamPipeline`, `--mode baseline|optimized`) — **not** `feat_stream_60m.py`, which is
+a plain Spark job that only computes feature aggregates from whatever clean event stream this
+Flink pipeline produces. See `streaming/README.md` for full run instructions, including why
+this runs in its own Python 3.12 environment (`apache-flink` has no 3.13 wheel).
 
-### Fix D — Watermarks + Backpressure (Problem D: 30× burst traffic)
+These are observed in the **Flink Web UI** (not on by default — `streaming/README.md`
+documents how to enable it; `localhost:8081` in these instructions, adjust if that port is
+already taken on your machine), not the Spark UI.
+
+### Fix D — Buffer Timeout / Backpressure (Problem D: 30× burst traffic)
 
 #### What was injected
 
 Event rate spikes 30× during 12:00–12:20 and 20:00–20:20.
 
-#### How to identify — Flink UI (before fix)
+#### How to identify — Flink UI (before fix — `--mode baseline`)
 
 **Tab: Jobs → click the streaming job → Subtasks**
 
@@ -232,32 +254,38 @@ Event rate spikes 30× during 12:00–12:20 and 20:00–20:20.
 |---|---|
 | Backpressure | `HIGH` label on source operator during burst window |
 | Checkpoint duration | Spikes above the checkpoint interval during burst |
-| Watermark lag | Grows unbounded — watermarks fall behind event time |
 
 Screenshot to capture: **Subtasks panel showing Backpressure: HIGH on source.**
 
-#### Fix in code
+#### Fix in code — `FlinkStreamPipeline._build_env`
 
 ```python
-# feat_stream_60m.py
-env.set_buffer_timeout(100)            # flush every 100ms instead of waiting for full buffer
-stream.set_max_parallelism(8)          # allow dynamic rescaling during burst
-WatermarkStrategy \
-    .for_bounded_out_of_orderness(Duration.of_minutes(5)) \
-    .with_idleness(Duration.of_seconds(30))
+# flink_stream_pipeline.py
+if self.mode == "optimized":
+    env.set_buffer_timeout(BUFFER_TIMEOUT_MS)   # 100ms — Flink's own default, made explicit
+else:
+    env.set_buffer_timeout(-1)   # baseline: flush only when a buffer fills — the
+                                  # burst-window symptom, since Flink's default (100ms)
+                                  # already flushes promptly and has to be actively
+                                  # regressed to reproduce the "before" evidence
 ```
 
-Screenshot to capture (after): **Backpressure: OK on source; checkpoint duration stable.**
+`get_buffer_timeout()` on a fresh `StreamExecutionEnvironment` already returns `100` — Flink
+ships with responsive flushing by default. `baseline` mode has to explicitly set `-1` to
+reproduce the buffer-buildup symptom; `optimized` mode just makes the default explicit rather
+than relying on it silently.
+
+Screenshot to capture (after — `--mode optimized`): **Backpressure: OK on source.**
 
 ---
 
-### Fix E — AllowedLateness (Problem E: 12 % late arrivals)
+### Fix E — Bounded Out-of-Orderness Watermark (Problem E: 12 % late arrivals)
 
 #### What was injected
 
 12 % of events have `created_ts` 5–45 minutes after `event_timestamp`.
 
-#### How to identify — Flink UI (before fix)
+#### How to identify — Flink UI (before fix — `--mode baseline`)
 
 **Tab: Jobs → Metrics → select `numLateRecordsDropped`**
 
@@ -267,21 +295,29 @@ Screenshot to capture (after): **Backpressure: OK on source; checkpoint duration
 
 Screenshot to capture: **Metrics panel showing numLateRecordsDropped > 0.**
 
-#### Fix in code
+#### Fix in code — `FlinkStreamPipeline._apply_watermark_strategy`
 
 ```python
-# feat_stream_60m.py
-stream \
-    .window(TumblingEventTimeWindows.of(Time.minutes(60))) \
-    .allowed_lateness(Time.minutes(45)) \
-    .side_output_late_data(late_tag)
+# flink_stream_pipeline.py
+if self.mode == "optimized":
+    strategy = WatermarkStrategy.for_bounded_out_of_orderness(
+        Duration.of_minutes(LATE_ARRIVAL_MINUTES)   # 45 — covers the injected 5-45min range
+    ).with_timestamp_assigner(EventTimestampAssigner())
+else:
+    # No out-of-orderness tolerance: any event later than the current
+    # watermark is immediately "late" — the Problem E symptom.
+    strategy = WatermarkStrategy.for_monotonous_timestamps().with_timestamp_assigner(
+        EventTimestampAssigner()
+    )
 ```
 
-`AllowedLateness(45 min)` holds window state open to accept the injected 5–45 min late
-events. Records that arrive after 45 min are routed to a side output for audit rather than
-dropped.
+45-minute bounded out-of-orderness covers the generator's full 5–45 min late-arrival range, so
+a late event still lands in its correct window instead of being dropped. (No separate
+`allowed_lateness`/side-output step on the window operator — the watermark tolerance alone
+covers the injected range; a side-output audit path would only matter for events later than
+45 min, which this dataset doesn't produce.)
 
-Screenshot to capture (after): **numLateRecordsDropped = 0; side output counter > 0.**
+Screenshot to capture (after — `--mode optimized`): **numLateRecordsDropped = 0.**
 
 ---
 
@@ -292,41 +328,49 @@ Screenshot to capture (after): **numLateRecordsDropped = 0; side output counter 
 1.5 % of events are re-emitted with the same `event_id` but a slightly shifted
 `event_timestamp`.
 
-#### How to identify — Flink UI (before fix)
+#### How to identify — Flink UI (before fix — `--mode baseline`)
 
-No direct UI counter — identified via a count query:
+No direct UI counter — identified via a count query against the sink output:
 
-```sql
-SELECT COUNT(*) - COUNT(DISTINCT event_id) AS duplicates
-FROM bronze_events;
+```bash
+find b_schema_pipelines/streaming_data/flink_clean_events/baseline -name "*.json" \
+    -exec cat {} + | python3 -c "
+import sys, json
+ids = [json.loads(l)['event_id'] for l in sys.stdin]
+print('total:', len(ids), 'distinct:', len(set(ids)))"
 ```
 
-Returns > 0, matching the injected 1.5 % rate.
+`total > distinct`, matching the injected 1.5 % rate. Verified during development against a
+2000-event sample containing 13 real duplicates: `baseline` → 2000 total / 1987 distinct;
+`optimized` → 1987 total / 1987 distinct (zero duplicates reach the sink).
 
-#### Fix in code
+#### Fix in code — `DedupByEventId` (`KeyedProcessFunction`), applied by `_apply_dedup`
 
 ```python
-# feat_stream_60m.py — keyed ValueState dedup
-class DedupFunction(KeyedProcessFunction):
-    def __init__(self):
-        self.seen = None
+# flink_stream_pipeline.py
+class DedupByEventId(KeyedProcessFunction):
+    def open(self, runtime_context) -> None:
+        ttl_config = StateTtlConfig.new_builder(Time.hours(DEDUP_STATE_TTL_HOURS)).build()
+        descriptor = ValueStateDescriptor("seen", Types.BOOLEAN())
+        descriptor.enable_time_to_live(ttl_config)
+        self.seen = runtime_context.get_state(descriptor)
 
-    def open(self, ctx):
-        desc = ValueStateDescriptor("seen", Types.BOOLEAN())
-        desc.enable_time_to_live(StateTtlConfig.new_builder(Time.hours(2)).build())
-        self.seen = ctx.get_key_value_state(desc)
+    def process_element(self, value, ctx):
+        if self.seen.value():
+            return
+        self.seen.update(True)
+        yield value
 
-    def process_element(self, event, ctx, out):
-        if not self.seen.value():
-            self.seen.update(True)
-            out.collect(event)
-
-stream.key_by(lambda e: e.event_id).process(DedupFunction())
+# applied only in optimized mode:
+stream.key_by(lambda e: e["event_id"]).process(DedupByEventId(), output_type=...)
 ```
 
-State TTL of 2 hours prevents unbounded state growth.
+State TTL of `DEDUP_STATE_TTL_HOURS` (2h) prevents unbounded state growth — an `event_id` is
+only tracked long enough to catch the generator's same-run duplicate emission, not forever.
+`baseline` mode skips this step entirely, so duplicates flow straight through to the sink.
 
-Screenshot to capture (after): **Operator state size stable (bounded by TTL); duplicate count query returns 0.**
+Screenshot to capture (after — `--mode optimized`): **duplicate count query above returns
+`total == distinct`.**
 
 ---
 
@@ -340,9 +384,9 @@ Screenshot to capture (after): **Operator state size stable (bounded by TTL); du
 | 3a | Window dedup | Spark History | Stages → DAG | No Exchange | Exchange node |
 | 3b | Window dedup | Terminal / log | rows_in vs rows_out | ~909 k = ~909 k | ~909 k → ~890 k |
 | 4 | Broadcast join | Spark History | SQL → plan DAG | SortMergeJoin + 2 Exchange | BroadcastHashJoin + 0 Exchange |
-| 5 | Flink backpressure | Flink UI | Subtasks → Backpressure | HIGH | OK |
-| 6 | AllowedLateness | Flink UI | Metrics → numLateRecordsDropped | > 0 | = 0 |
-| 7 | Event dedup | DBeaver | Query result | duplicates > 0 | duplicates = 0 |
+| 5 | Buffer timeout / backpressure | Flink UI | Subtasks → Backpressure | HIGH (`--mode baseline`) | OK (`--mode optimized`) |
+| 6 | Bounded out-of-orderness watermark | Flink UI | Metrics → numLateRecordsDropped | > 0 (`--mode baseline`) | = 0 (`--mode optimized`) |
+| 7 | Event dedup | Terminal (sink query, §Fix F) | total vs. distinct event_id count | total > distinct (`--mode baseline`) | total == distinct (`--mode optimized`) |
 
 Place all screenshots under `b_schema_pipelines/docs/screenshots/` named
 `fix<N>_<before|after>_<description>.png`.

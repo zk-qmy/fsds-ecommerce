@@ -10,9 +10,38 @@ consume its output.
 Code and design drift; if something below no longer matches `git log` / the file tree, the
 code wins and this doc must be updated in the same PR.
 
+**Point values below cite `coursework/rubrics.md` (the actual instructor rubric) —
+`coursework/IMPLEMENTATION_GUIDE.md` originally had several wrong (Spark 12 vs. actual 16,
+Flink 10 vs. 13, DataHub 14 vs. 12, and it was missing the "visualize tables on all zones"
+item entirely — misattributed to DataHub instead of Schema Design). `IMPLEMENTATION_GUIDE.md`
+has since been corrected to match `rubrics.md` too, so both sources now agree; this note stays
+as a record of the discrepancy that was found, not an active warning.
+
 ---
 
 ## 0. What's already done (do not re-build)
+
+**Live-audit note:** everything below was cross-checked against `rubrics.md` and, for the
+three feature jobs, against a real running PostgreSQL + Trino/MinIO stack — not just passing
+unit tests. Two real bugs were found and fixed this way, neither caught by any test (both mock
+the layer where the bug lived):
+1. **AQE skew-join fix was inert** — `transform_silver.py`'s config was commented out and
+   `docs/02_spark_optimisation_report.md` falsely claimed it lived in `pipeline_base.py` (it
+   never did). Fixed: `_run_baseline()` now explicitly disables it, `_run_optimized()` now
+   explicitly enables it — see §5's Silver test suite (38/38 passing after the fix).
+2. **All three feature jobs' idempotent DELETE silently matched zero rows** — PySpark collects
+   timestamps as naive datetimes in the Spark session's local timezone; `psycopg2` compared
+   them against Postgres's own connection-default timezone instead, so every re-run appended
+   duplicates instead of replacing. Caught live: `feat_customer_unified` had 41,230 duplicate
+   `(customer_id, event_timestamp)` rows after two runs. Fixed with `SET TIME ZONE <spark
+   session tz>` on the psycopg2 connection before each DELETE, in all three files. Verified
+   live: same job run twice against the same snapshot now produces identical row counts (see
+   `sum.md`'s "Idempotent writes" note for the full before/after).
+
+All three feature tables were wiped and rebuilt clean after the fix — `feat_customer_90d`
+(120,000 rows, snapshot `2026-06-22`), `feat_stream_60m` (228,277 rows), `feat_customer_unified`
+(228,277 rows, 207,174 with real joined offline data) — all confirmed duplicate-free in
+PostgreSQL directly, not just via Spark-side row counts.
 
 | Component | File | Status |
 |---|---|---|
@@ -22,46 +51,63 @@ code wins and this doc must be updated in the same PR.
 | Shared infra | `pipelines/pipeline_base.py`, `common/delta_writer.py`, `minio_client.py` | ✅ done, tested |
 | Delta compaction | `common/delta_writer.py:100` (`.optimize().executeCompaction()`) | ✅ done — Z-order is **not** done (see §4) |
 | Schema design doc | `docs/02_schema_piplines.md` | ✅ complete (dims, facts, OBT, naming, SLAs, indexing/partitioning plan — not yet implemented in code) |
-| Spark optimisation report (Fixes 1–4) | `docs/02_spark_optimisation_report.md` | ✅ Fixes 1–4 (AQE skew, NULL fill, dedup, broadcast join) accurate. **Fixes D/E/F (Flink section) are currently wrong** — see §2 |
+| Spark optimisation report (Fixes 1–4) | `docs/02_spark_optimisation_report.md` | ✅ Fixes 1–4 (AQE skew, NULL fill, dedup, broadcast join) accurate. Fix D/E/F code blocks still need repointing at the Flink file — see §2 |
+| Flink streaming pipeline | `pipelines/streaming/flink_stream_pipeline.py` | ✅ done — `--mode baseline\|optimized`, Problems D/E/F, verified end-to-end against real sample data (§8) |
+| Unified feature join | `pipelines/features/feat_customer_unified.py` | ✅ done — as-of join (§7), 8/8 tests pass |
 
 ## 1. What's stubbed (tests exist, implementation raises `NotImplementedError`)
 
 | File | Class | Test file | Status |
 |---|---|---|---|
 | `pipelines/features/feat_customer_90d.py` | `CustomerFeature90d` | `tests/b_schema_pipelines/test_feat_customer_90d.py` | ✅ done — renamed + implemented (§5), 12/12 tests pass |
-| `pipelines/features/feat_stream_60m.py` | `StreamFeature60m` | `tests/b_schema_pipelines/test_feat_stream_60m.py` | ⬜ renamed, not yet implemented (§6) |
+| `pipelines/features/feat_stream_60m.py` | `StreamFeature60m` | `tests/b_schema_pipelines/test_feat_stream_60m.py` | ✅ done — implemented (§6), 16/16 tests pass |
+| `pipelines/features/feat_customer_unified.py` | `CustomerFeatureUnified` | `tests/b_schema_pipelines/test_feat_customer_unified.py` | ✅ done — new (§7), 8/8 tests pass |
+
+All three feature-job test files (36 tests total) also pass run together, confirming no
+cross-test interference on the shared session-scoped Spark fixture.
 
 Every test in both files was `@pytest.mark.xfail(strict=True, raises=NotImplementedError, ...)`.
 As each private method is implemented, **delete its `xfail` marker** — `strict=True` means
 a passing test under an `xfail` marker is itself a failure, so leaving markers in place
-after implementing the code will break CI, not fix it. (Done for `feat_customer_90d.py`;
-still pending for `feat_stream_60m.py`.)
+after implementing the code will break CI, not fix it. Done for both files.
 
-**Known pre-existing bug in `test_feat_stream_60m.py` (found while verifying §5's changes
-didn't regress the suite, not caused by them):** `test_burst_flag_value`'s `parametrize` builds
-`spark.createDataFrame([("E_TEST", event_time, "C001")], schema=schema)` where `schema`
-declares `event_timestamp` as `TimestampType()` but `event_time` is a raw Python string — the
-`.withColumn("event_timestamp", F.to_timestamp(...))` cast that follows never gets a chance to
-run, because `createDataFrame` itself rejects the type mismatch first
-(`PySparkTypeError: ... can not accept object '...' in type <class 'str'>`). Since that's not
-`NotImplementedError`, the `xfail(strict=True, raises=NotImplementedError)` marker doesn't
-match and pytest reports a hard failure instead of an expected xfail — all 11 parametrized
-cases of that one test currently fail on `main`/this branch regardless of `_add_burst_flag`'s
-implementation state. Fix when starting §6: either type the schema's `event_timestamp` field
-as `StringType()` and cast after `createDataFrame`, or pass already-cast values in.
+**Pre-existing bugs fixed while implementing §6:**
+1. `test_burst_flag_value`'s `parametrize` built `spark.createDataFrame([("E_TEST", event_time, "C001")], schema=schema)`
+   where `schema` declared `event_timestamp` as `TimestampType()` but `event_time` was a raw
+   Python string — `createDataFrame` rejected the type mismatch before the
+   `.withColumn(F.to_timestamp(...))` cast that followed ever got a chance to run. Fixed by
+   typing the schema field `StringType()` and casting after construction (the test already did
+   this — it just needed the schema type corrected to match). Also trimmed the case list from
+   11 to 6: kept both windows' start (inclusive) and end (exclusive) boundaries plus one
+   off-peak point, dropped the redundant interior/duplicate off-peak cases.
+2. `test_compute_features_burst_flag_set_in_burst_window` and `..._clear_off_peak` called
+   `_compute_features(parsed_events)` directly, but `parsed_events` has no
+   `f_stream_burst_activity_flag` column — that column only exists after `_add_burst_flag` runs
+   (see `run()`'s call order). `_compute_features` would `AnalysisException` on the missing
+   column regardless of implementation. Fixed by adding a `flagged_events` fixture
+   (`_add_burst_flag(parsed_events)`) and using it in every `_compute_features` test, not just
+   those two — matches how the real pipeline always calls them.
 
-## 2. Known doc/code mismatch to resolve first
+Also dropped 5 trivial tests that asserted a class constant equals its own literal
+(`test_prefix_is_feat_60m`, `test_feat_table_name`, `test_window_minutes`,
+`test_burst_windows_defined`) and one that couldn't pass against the real logger
+(`test_run_logs_success` — assumed `run()` calls `self.spark.stop()` and that `PipelineBase`'s
+structured JSON log line appears alone on stdout with `status: "success"`; in reality
+`log_run`'s handler writes to **stderr**, in a human-readable format with a `STRUCTURED {...}`
+JSON line embedded at DEBUG level, and every other job in this repo logs `status: "ok"`, not
+`"success"`). `test_run_pipeline_order` already covers `run()`'s call sequence; re-verifying
+`PipelineBase`'s own logging format isn't this file's job. 27 collected test items → 16.
 
-`docs/02_spark_optimisation_report.md` §"Flink Fixes (Problems D/E/F)" documents real PyFlink
-code (`WatermarkStrategy`, `KeyedProcessFunction`, Flink Web UI at `localhost:8081`) as if it
-lives inside `feat_stream_60m.py`. It doesn't — that file is a Spark job. There is no Flink
-anywhere in `pyproject.toml` or `infra/docker-compose.yml` today.
+## 2. Known doc/code mismatch — ✅ resolved
 
-**Resolution (confirmed):** build real PyFlink jobs. `feat_stream_60m.py` stays a Spark job
-that computes the 4 offline-style feature aggregates; a new Flink pipeline sits upstream of it
-and owns Problems D/E/F. See §3 for the split. Once §3 is implemented, update
-`02_spark_optimisation_report.md`'s Fix D/E/F code blocks to point at
-`pipelines/streaming/flink_stream_pipeline.py` instead of `feat_stream_60m.py`.
+`docs/02_spark_optimisation_report.md` §"Flink Fixes (Problems D/E/F)" used to document real
+PyFlink code as if it lived inside `feat_stream_60m.py` (a Spark job). It's fixed now:
+`pipelines/streaming/flink_stream_pipeline.py` (§8) owns Problems D/E/F for real, and
+`feat_stream_60m.py` (§6) only computes the 4 feature aggregates from whatever clean event
+stream it's pointed at. **Still TODO:** `02_spark_optimisation_report.md`'s Fix D/E/F code
+blocks still say `feat_stream_60m.py` in their comments — repoint them at
+`streaming/flink_stream_pipeline.py`'s actual method names
+(`_apply_dedup`/`_apply_watermark_strategy`/`_build_env`) next time that doc is touched.
 
 ---
 
@@ -88,13 +134,15 @@ New files to create:
 
 ```
 b_schema_pipelines/pipelines/features/
-├── feat_customer_90d.py            # renamed, then implemented (§5)
-├── feat_stream_60m.py              # renamed, then implemented (§6)
-├── feat_customer_unified.py        # NEW — point-in-time join of the above two (§7)
-└── README.md                       # this file
+├── feat_customer_90d.py            # ✅ done — renamed, then implemented (§5)
+├── feat_stream_60m.py              # ✅ done — renamed, then implemented (§6)
+├── feat_customer_unified.py        # ✅ done — point-in-time join of the above two (§7)
+├── README.md                       # this file
+└── sum.md                          # ✅ done — feature-pipeline run/verify guide (see §7 for the as-of join design writeup)
 
-b_schema_pipelines/pipelines/streaming/                # NEW (§8)
-└── flink_stream_pipeline.py        # baseline/optimized PyFlink job (Problems D/E/F)
+b_schema_pipelines/pipelines/streaming/                # ✅ done (§8)
+├── flink_stream_pipeline.py        # baseline/optimized PyFlink job (Problems D/E/F)
+└── README.md                       # own-Python-3.12-env run instructions
 
 b_schema_pipelines/dq/                                  # NEW (§9)
 ├── bronze_suite.py                 # GE expectations: schema + null-PK checks
@@ -104,11 +152,12 @@ b_schema_pipelines/dq/                                  # NEW (§9)
 b_schema_pipelines/dags/                                # NEW (§10)
 ├── dp1_bronze_dag.py
 ├── dp2_gold_dag.py
-└── dp3_feature_dag.py
+└── dp3_feature_dag.py                  # runs all three feature jobs
 
 b_schema_pipelines/docs/
-├── 02_storage_optimization.md      # NEW (§4)
-└── 02_datahub_lineage.md           # NEW (§11)
+├── 02_storage_optimization.md          # NEW (§4)
+├── 02_datahub_lineage.md               # NEW (§11)
+└── register_bronze_silver_trino.sql    # ✅ done (§12) — one-time Trino table registration
 ```
 
 **Explicitly out of scope for this plan** (belongs to Final ML Coursework / Section 04, not
@@ -161,7 +210,7 @@ Scan) vs. after (Index Scan), captured in the doc.
 
 ---
 
-## 5. `feat_customer_90d.py` — ✅ implemented (IMPLEMENTATION_GUIDE 1.5, part of the 12 pts)
+## 5. `feat_customer_90d.py` — ✅ implemented (IMPLEMENTATION_GUIDE 1.5; rubrics.md: Spark jobs, 16 pts total)
 
 All 12 tests in `test_feat_customer_90d.py` pass (`uv run pytest tests/b_schema_pipelines/test_feat_customer_90d.py -v`). Trimmed from
 the original 15: dropped `test_feat_table_name` and `test_window_days_constant` (asserted a
@@ -201,122 +250,137 @@ Delete all 10 `xfail` markers in the test file as each lands; run
 
 ---
 
-## 6. `feat_stream_60m.py` — implement (IMPLEMENTATION_GUIDE 1.5)
+## 6. `feat_stream_60m.py` — ✅ implemented (IMPLEMENTATION_GUIDE 1.5)
 
-Same approach — implement to the existing docstrings in `test_feat_stream_60m.py`'s target.
-One change from the current stub's assumption: **`_read_events()`'s default source becomes
-the Flink pipeline's clean-sink output**, not raw `events.json`, once §8 exists —
-`events_source` stays a constructor param so tests keep passing raw NDJSON directly
-(that part of the test suite is source-format-agnostic; it just checks the cast + schema).
+All 16 tests in `test_feat_stream_60m.py` pass. Implemented per the stub's docstrings, with
+one deviation from this plan's original draft: **`_read_events()`'s default `events_source` is
+still raw `events.json`**, not the Flink sink's output — kept that way so the feature job runs
+standalone (no Flink run required first) for local dev/testing. Production/Airflow wiring
+passes `--events-source b_schema_pipelines/streaming_data/flink_clean_events/optimized`
+explicitly (documented in both files' run instructions). `_read_events` also adds
+`.option("recursiveFileLookup", "true")` — needed either way, since Flink's `FileSink` buckets
+output into `<mode>/<yyyy-MM-dd--HH>/` subdirectories.
 
-Implementation order:
+`_compute_features` computes `_window` as a per-row column (`F.window(...)` via `withColumn`,
+not as a `groupBy` key expression) specifically so `_window.start` is available as a plain
+column inside the 30-minute-cutoff `WHEN` conditions — referencing a `groupBy` key column
+inside its own `.agg()` call works in some Spark versions but isn't something to rely on
+blind; per-row computation avoids the question entirely.
 
-1. `_build_spark()` — same JDBC-jar pattern as §5.
-2. `_read_events()` — explicit schema (given in docstring), `to_timestamp` casts on
-   `event_timestamp`/`created_ts`.
-3. `_add_burst_flag(events_df)` — `hour==12 & minute<20` / `hour==20 & minute<20` per the
-   parametrized boundary tests (12:20 and 20:20 are exclusive).
-4. `_compute_features(events_df)` — `F.window("event_timestamp", "60 minutes")` groupBy,
-   with the 30-min sub-window filters for views/add_to_cart per the docstring.
-5. `_write(df)` — same DELETE-then-INSERT idempotency pattern as §5, keyed on window start.
-6. `run()` — wire `_read_events → _add_burst_flag → _compute_features → _write` (order is
-   asserted by `test_run_pipeline_order`).
+`_write` mirrors `feat_customer_90d.py`'s psycopg2-DELETE-then-Spark-JDBC-INSERT pattern,
+generalized from "one snapshot_date" to "every distinct window start present in this batch"
+(`DELETE ... WHERE event_timestamp = ANY(%s)`).
 
----
-
-## 7. `feat_customer_unified.py` — NEW
-
-Per `CLAUDE.md`'s data model: `feat_customer_unified` is the point-in-time join of
-`feat_customer_90d` and `feat_stream_60m` into one row per `(customer_id, event_timestamp)`.
-This is what Section 03's `training_table.py` (out of scope here, but depends on this table
-existing) ultimately joins against `ml_customer_label`.
-
-Model this file after `feat_customer_90d.py`'s shape (`PipelineBase` subclass,
-`FEAT_TABLE = "feat_customer_unified"`), but its `_compute_features()` is a **join, not an
-aggregation**:
-
-```python
-# LEFT JOIN — a customer may have offline features without a recent stream session
-feat_customer_90d.join(
-    feat_stream_60m,
-    on=["customer_id", "event_timestamp"],
-    how="left",
-)
-```
-
-Any stream feature columns that are `NULL` after the left join (no session in that window)
-should default to `0` (counts/ratios) rather than `NULL` — document this fill choice inline,
-it's a modeling decision that affects the ML features downstream (Section 04) and is easy to
-get silently wrong.
-
-**Point-in-time correctness**: both inputs already carry `event_timestamp` from their own
-snapshot/window-start logic — this join must not introduce a leak by joining on anything
-looser than exact `(customer_id, event_timestamp)` equality.
-
-Write a new test file `tests/b_schema_pipelines/test_feat_customer_unified.py` mirroring the
-xfail-then-implement pattern used for the other two feature files — write the tests *before*
-the implementation (same convention already established in this repo), covering: left-join
-correctness, null-fill on missing stream features, one-row-per-customer-per-timestamp,
-output schema.
+**Two pre-existing test bugs found and fixed** — see §1's tracking table for detail
+(`test_burst_flag_value`'s schema type mismatch; the burst-flag `_compute_features` tests
+missing the `_add_burst_flag` step). Also dropped 5 trivial/unfixable tests — 27 collected
+items → 16.
 
 ---
 
-## 8. Flink streaming pipeline (`pipelines/streaming/flink_stream_pipeline.py`) — NEW, IMPLEMENTATION_GUIDE 1.6, 10 pts
+## 7. `feat_customer_unified.py` — ✅ implemented
 
-**Design choice:** one file with `--mode baseline|optimized`, mirroring
-`transform_silver.py`'s and `build_gold.py`'s existing convention in this repo, rather than
-four separate `flink_baseline.py`/`flink_burst_handler.py`/etc. files as
-`IMPLEMENTATION_GUIDE.md`'s generic template suggests. Each fix is still its own private
-method (documented separately, screenshotted separately) — only the *file* is shared, to stay
-consistent with how Silver and Gold are already structured. If a grader specifically wants 4
-separate files, this is a 10-minute mechanical split — the logic doesn't change.
+**Correction to this plan's original draft, made before writing any code:** the sketch above
+proposed an equi-join on `(customer_id, event_timestamp)`. That's wrong — `feat_customer_90d`
+has one row per customer per **day** (`event_timestamp` = midnight snapshot date) while
+`feat_stream_60m` has one row per customer per **60-min window** (`event_timestamp` = window
+start, any time of day). An equi-join between those two grains would only match when a stream
+window happened to start at exactly midnight on a snapshot day — effectively never. Confirmed
+with you before implementing; resolution (your call): **as-of join, stream grain**.
 
-```python
-class FlinkStreamPipeline:
-    """Reads a_data_generator/outputs/streaming/events.json, applies backpressure/watermark/
-    dedup/windowing fixes, writes a cleaned event stream that feat_stream_60m.py consumes."""
+**Actual design:** output grain follows `feat_stream_60m` (the finer-grained table). For each
+stream row, attach the *latest* `feat_customer_90d` row at or before that row's
+`event_timestamp`, per customer — via a `Window.partitionBy("customer_id",
+"event_timestamp").orderBy(offline_event_timestamp.desc())` + `row_number() == 1` after a
+left join with the range condition `offline.event_timestamp <= stream.event_timestamp`. This
+satisfies CLAUDE.md's point-in-time rule directly (`f.event_timestamp <= l.event_timestamp`)
+rather than approximating it with an equality condition.
 
-    def run(self, mode: str) -> None:
-        env = self._build_env(mode)              # buffer timeout only differs by mode
-        source = self._file_source()
-        stream = env.from_source(source, ...)
-        if mode == "optimized":
-            stream = self._apply_watermark_strategy(stream)   # Fix E — 45min out-of-orderness
-            stream = self._apply_dedup(stream)                 # Fix F — keyed ValueState on event_id
-        windowed = self._apply_windowing(stream)                # Problem D demo — tumbling 1h window
-        self._write_sink(windowed, mode)
-```
+**Null-fill rule generalizes the one already established in `feat_customer_90d.py`:** a stream
+row with no applicable offline snapshot yet (new customer, or a window before that customer's
+first snapshot) gets counts/rate defaulted to `0`, but `f_customer_avg_order_value_90d` stays
+`NULL` — same reasoning either way: the average of zero orders is undefined, not zero, whether
+the zero comes from an as-of join finding nothing or from `feat_customer_90d.py`'s own
+zero-order aggregation.
 
-- **Backpressure (Problem D):** `env.set_buffer_timeout(100)` in `optimized` mode only —
-  baseline leaves Flink's default (unbounded buffering under burst load, causing the
-  `Backpressure: HIGH` UI symptom the report doc already describes).
-- **Watermark + AllowedLateness (Problem E):**
-  `WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_minutes(45))` +
-  `.allowed_lateness(Time.minutes(45))`, matching the 12%/5–45min late-arrival injection rate
-  from `a_data_generator`.
-- **Dedup (Problem F):** keyed `ValueState[bool]` on `event_id` with a 2-hour TTL (bounds
-  state growth) — this is the piece currently mis-attributed to `feat_stream_60m.py` in the
-  report doc; move it here.
-- **Windowing:** `TumblingEventTimeWindows.of(Time.hours(1))` keyed by `customer_id` —
-  this is the "window processing" line item IMPLEMENTATION_GUIDE 1.6 grades separately (2 pts).
+`tests/b_schema_pipelines/test_feat_customer_unified.py` (written before the implementation,
+per the established convention) — **8/8 passing**:
 
-**Local dev execution:** Flink needs a local MiniCluster to expose the Web UI at
-`localhost:8081` (same idea as the Spark History Server pattern in `bronze/README.md`). This
-requires adding `apache-flink` to `pyproject.toml` (root-level file — **ask before editing**,
-per your instruction to get permission for anything outside Section 02) and documenting
-startup steps in a new `streaming/README.md` modeled on `bronze/README.md`'s Spark History
-Server section.
+| Test | What it proves |
+|---|---|
+| `test_asof_join_picks_latest_snapshot_at_or_before` | With two offline snapshots for the same customer, the join picks the *latest* one at or before the stream timestamp — not just any match |
+| `test_asof_join_excludes_future_snapshots` | A stream window between two snapshots attaches the *earlier* one — the later (future-dated) snapshot is never leaked in |
+| `test_asof_join_missing_offline_snapshot_fills_counts_with_zero` | A customer with no offline snapshot at all gets `0` for counts/rate, not `NULL` |
+| `test_asof_join_missing_offline_snapshot_avg_order_value_stays_null` | ...but `f_customer_avg_order_value_90d` stays `NULL` in that same case |
+| `test_stream_features_pass_through_unchanged` | The join doesn't corrupt the stream-side columns |
+| `test_compute_features_one_row_per_stream_window` | The ranked-window filter doesn't fan out rows — output count equals input `feat_stream_60m` row count |
+| `test_compute_features_output_schema` | All 11 expected columns present |
+| `test_run_calls_compute_then_write` | `run()` wiring unaffected by the join-logic change |
 
-**Sink target:** write cleaned NDJSON to `b_schema_pipelines/streaming_data/flink_clean_events/`
-(same schema as `events.json`, this is a purely local-dev path — no MinIO/S3A dependency
-needed for Flink specifically). `feat_stream_60m.py`'s `events_source` default becomes this
-path once the Flink job exists; `events.json` remains a fallback for running the feature job
-standalone without Flink running.
+**How this was caught:** before writing any implementation code, the plan's draft join sketch
+was checked against the actual output schemas of the two upstream jobs — a five-minute read of
+both files' already-implemented `_compute_features` methods was enough to see the timestamps
+could never line up under an equi-join. Flagged to you with the concrete failure mode
+(near-total `NULL` offline columns) before implementing; the as-of join direction was confirmed
+as the fix before any code was written — not discovered via a failing test after the fact.
 
-**Report doc update:** once this file exists, edit `docs/02_spark_optimisation_report.md`'s
-Fix D/E/F code blocks to reference `streaming/flink_stream_pipeline.py` methods instead of
-`feat_stream_60m.py` (§2). This is a docs-only change inside `b_schema_pipelines/`, no
-permission needed.
+---
+
+## 8. Flink streaming pipeline (`pipelines/streaming/flink_stream_pipeline.py`) — ✅ built, IMPLEMENTATION_GUIDE 1.6; rubrics.md: 13 pts (baseline 2 + burst 3 + late-arrival 3 + dedup 3 + window processing 2)
+
+**Design choice (as planned):** one file with `--mode baseline|optimized`, mirroring
+`transform_silver.py`'s and `build_gold.py`'s convention, instead of 4 separate
+`flink_*.py` files. `FlinkStreamPipeline.run()` wires `_read_and_clean → _write_sink` +
+`_apply_windowing(...).print()` as a second branch; each fix is its own private method.
+
+**Two deviations from the original draft, discovered while getting this actually running (see
+below for why — this file's logic was verified end-to-end against real `events.json` data
+before being written, not written from memory):**
+
+1. **PyFlink's Python runtime is Apache Beam's Fn API worker under the hood.** During
+   `env.execute()`, it replaces the root logger's handlers with its own and never hands them
+   back — any `logging` call made *after* `execute()` returns is silently dropped, even though
+   it works fine *during* execution (Flink's own `.print()` DataStream sink is unaffected — it
+   writes directly, not through Python `logging`). `_log_run`'s structured summary line uses
+   plain `print()`, not `logger.info`/`logger.error`, and documents why inline.
+2. **No Python 3.13 wheel for `apache-flink`** (max is 3.12) — confirmed via PyPI metadata
+   before writing any code. Per your call: runs via
+   `uv run --no-project --python 3.12 --with apache-flink`, an ephemeral uv-managed
+   environment. **`pyproject.toml` was never touched** — no permission needed, since this
+   sidesteps the root project entirely rather than editing it.
+
+- **Backpressure (Problem D):** `env.set_buffer_timeout(100)` in `optimized` mode;
+  `env.set_buffer_timeout(-1)` (flush only when a buffer fills) in `baseline` — verified this
+  is in fact Flink's non-default behavior (`get_buffer_timeout()` returns `100` out of the box,
+  so `baseline` has to *explicitly regress* to `-1` to demonstrate the symptom, not just omit a
+  call).
+- **Watermark + lateness (Problem E):** `optimized` uses
+  `WatermarkStrategy.for_bounded_out_of_orderness(Duration.of_minutes(45))`; `baseline` uses
+  `for_monotonous_timestamps()` (any out-of-order event is immediately "late").
+- **Dedup (Problem F):** keyed `ValueState[bool]` on `event_id`, 2h TTL, `optimized` mode only.
+  Verified against a real 2000-event sample containing 13 duplicate `event_id`s:
+  `optimized` → 1987 output rows, all distinct; `baseline` → 2000 rows, 13 dupes still present.
+- **Windowing:** `TumblingEventTimeWindows.of(Time.hours(1))` keyed by `customer_id`,
+  `ViewCountAggregate` — the "window processing" line item (2 pts), printed rather than
+  sunk to a file (it's a demo output, not consumed downstream).
+
+**Sink target:** `b_schema_pipelines/streaming_data/flink_clean_events/<mode>/` — namespaced
+by mode (not a flat shared directory) specifically so a `baseline` evidence-capture run can
+never reintroduce duplicates into what `feat_stream_60m.py` reads; that job points at
+`.../optimized/` in production.
+
+**Flink Web UI:** not on by default — needs an explicit `Configuration().set_integer("rest.port", 8081)`
+passed to `get_execution_environment()`. Verified reachable (`curl localhost:8082/overview`
+returned live cluster JSON in testing; 8081 was occupied by something else on this machine, so
+the port is documented as adjustable, not hardcoded as a hard requirement). See
+`streaming/README.md` for the exact snippet and screenshot checklist.
+
+**No automated pytest suite** for this module, by design — see `streaming/README.md`'s Tests
+section for the reasoning (mirrors why Fix 1's AQE skew-join config has no dedicated test
+either: there's no behavior here that isn't already proven by actually running the job).
+
+**Still TODO:** `docs/02_spark_optimisation_report.md`'s Fix D/E/F code blocks still say
+`feat_stream_60m.py` — repoint them at this file next time that doc is touched (§2).
 
 ---
 
@@ -344,11 +408,19 @@ the SCD2 invariant (`is_current` uniqueness per `customer_id`).
 
 ---
 
-## 10. Airflow DAGs (`b_schema_pipelines/dags/`) — NEW, IMPLEMENTATION_GUIDE 1.8, 12 pts
+## 10. Airflow DAGs (`b_schema_pipelines/dags/`) — NEW, IMPLEMENTATION_GUIDE 1.8; rubrics.md: 12 pts (DP1 4 + DP2 4 + DP3 4)
 
 Three DAGs, matching `docs/02_schema_piplines.md`'s already-documented schedule
 (`dp1_bronze_dag` 00:00 → `dp2_gold_dag` 01:00/02:00 → `dp3_feature_dag` 02:30). Excludes
 `materialize_dag` (Feast, out of scope — §3).
+
+**`dp3_feature_dag` runs all three feature jobs** — `rubrics.md`'s DP3 line item literally
+only describes "Pipeline to compute offline feature table" (example:
+`f_customer_total_orders_90d`), which would technically be satisfied by `feat_customer_90d.py`
+alone. This was narrowed to that literal scope in an earlier pass, then reverted per your
+instruction — DP3 bundles all three feature jobs (matches `CLAUDE.md`'s architecture, and
+`feat_stream_60m.py`/`feat_customer_unified.py` need to run somewhere in the orchestrated
+pipeline eventually regardless of how this one rubric line is scored).
 
 **Operator choice — deviates from `IMPLEMENTATION_GUIDE.md`'s `SparkSubmitOperator` template
 deliberately:** every pipeline job in this repo runs as `uv run python3 <script>.py` against a
@@ -394,7 +466,7 @@ Once running, DAGs load via the existing (commented-out) volume mount
 
 ---
 
-## 11. DataHub lineage (`docs/02_datahub_lineage.md`) — NEW, IMPLEMENTATION_GUIDE 1.9, 14 pts
+## 11. DataHub lineage (`docs/02_datahub_lineage.md`) — NEW, IMPLEMENTATION_GUIDE 1.9; rubrics.md: 12 pts (DP1 4 + DP2 4 + DP3 4)
 
 Add a shared `emit_lineage()` helper to `pipeline_base.py` (in-scope — this file is inside
 `b_schema_pipelines/`):
@@ -419,37 +491,92 @@ DataHub UI's assertion tab, per `docs/02_schema_piplines.md`'s "Data contracts" 
 
 ---
 
-## 12. Sequencing
+## 12. Bronze/Silver visualization via Trino — ✅ done, rubrics.md: "Visualize tables on all zones", 2 pts
+
+**Gap found while cross-checking against `rubrics.md`:** this rubric item needs Bronze
+**and** Silver **and** Gold all visible in DBeaver — proof is a DBeaver screenshot. Only
+Gold had one before this (`assets/gold-schema.png`, via the direct PostgreSQL connection
+documented in `gold/README.md`). Bronze/Silver are Delta Lake tables on MinIO — not a
+database DBeaver can connect to directly.
+
+**Why this didn't already work:** `infra/trino/catalog/delta.properties` was already
+configured (Delta Lake connector, pointed at the Hive Metastore + MinIO credentials), and
+Trino itself was already running per `docker-compose.yml`. But nothing had ever registered
+those Delta tables into the Hive Metastore Trino reads from — Spark writing a Delta table to
+a MinIO path doesn't auto-register it.
+
+**What actually worked — corrected from this section's original draft:** the original plan
+proposed `CREATE TABLE ... WITH (location = ...)`. That failed on this Trino version
+(`trinodb/trino:410`) with a parser error (`mismatched input '<EOF>'`) even with
+`delta.legacy-create-table-with-existing-location.enabled=true` already set — confirmed by
+testing directly against the running container, not assumed. The connector wants the
+`register_table` system procedure instead, which was **disabled** by default:
 
 ```
-§3  Renames                         ← no dependency, do first (unblocks everything else)
-§5  feat_customer_90d.py            ← needs nothing new (Gold already exists)
-§8  Flink streaming pipeline        ← no dependency on §5/§6, can run in parallel
-§6  feat_stream_60m.py              ← works standalone against events.json; swap source to
-                                        Flink's sink once §8 lands
-§7  feat_customer_unified.py        ← needs §5 + §6 done
-§4  Storage optimization            ← needs Gold (already exists) — can run anytime
+register_table procedure is disabled
+```
+
+**Fix, applied:**
+1. Added one line to `infra/trino/catalog/delta.properties` (root-level, approved before
+   editing): `delta.register-table-procedure.enabled=true`.
+2. Restarted the Trino container (`docker compose restart trino`) to pick it up — config
+   reload, no data loss, no rebuild.
+3. Ran `b_schema_pipelines/docs/register_bronze_silver_trino.sql` (new file — `CREATE SCHEMA`
+   for `delta.bronze`/`delta.silver`, then `CALL delta.system.register_table(...)` per table:
+   6 Bronze tables — `customers`, `products`, `orders`, `order_items`, `payments`, `events`,
+   per `ingest_bronze.py` — and 5 Silver tables — same minus `events`, per
+   `transform_silver.py`'s `SILVER_TABLES`).
+4. Verified against the live container: `SHOW TABLES FROM delta.bronze` / `delta.silver` list
+   all 11 tables, `SELECT COUNT(*) FROM delta.bronze.customers` returns real data (not a
+   parse error or empty result).
+
+**Still needed for the actual grading evidence:** a DBeaver connection using the **Trino**
+driver (host `localhost`, port `8080`, no auth) alongside the existing `gold_ecommerce`
+PostgreSQL connection, and a screenshot showing all three zones' tables. That's a manual,
+GUI-only step — nothing left to automate.
+
+---
+
+## 13. Sequencing
+
+```
+§3  Renames                         ← ✅ done
+§5  feat_customer_90d.py            ← ✅ done
+§8  Flink streaming pipeline        ← ✅ done
+§6  feat_stream_60m.py              ← ✅ done (default source is still raw events.json — see §6)
+§7  feat_customer_unified.py        ← ✅ done (as-of join, not equi-join — see §7)
+§4  Storage optimization            ← needs Gold (already exists) — can run anytime, ready to start
+§12 Trino Bronze/Silver visualization ← ✅ done (tables registered + verified; DBeaver screenshot still manual)
 §9  dq/ GE suites                   ← needs nothing new, but is consumed by §10
-§10 Airflow DAGs                    ← needs §5, §6, §7, §8, §9 all done (DAGs call all of them)
-§11 DataHub lineage                 ← needs §5–§8 done (emits from each job)
+§10 Airflow DAGs                    ← needs §5, §6, §7, §8, §9 all done — §5/§6/§7/§8 done, only §9 left
+§11 DataHub lineage                 ← needs §5–§8 done (emits from each job) — all done, ready to start
 ```
 
-## 13. Approval checklist — files outside `b_schema_pipelines/`
+**Full feature pipeline chain (bronze → silver → gold → features → unified) is now complete
+and tested end to end.** Remaining Section 02 work is orchestration/governance/optimization,
+not more Spark jobs: §4 (storage), §9 (data quality), §10 (Airflow — `dp3_feature_dag` runs
+all three feature jobs), §11 (DataHub). §12 (Trino visualization) is code-complete; only the
+DBeaver screenshot itself remains, a manual GUI step.
+
+## 14. Approval checklist — files outside `b_schema_pipelines/`
 
 Per your instruction, none of these are touched without asking first. Flag each when its
 phase is reached:
 
-| File | Why it needs to change | Which phase |
-|---|---|---|
-| `pyproject.toml` | add `apache-flink`, `great-expectations`, `acryl-datahub` | §8, §9, §11 |
-| `infra/docker-compose.yml` | uncomment `airflow` service; add `datahub` service block | §10, §11 |
-| `CLAUDE.md` | optionally add `pipelines/streaming/` and `dq/` suite filenames to the repo-structure tree (currently silent on exact `dq/` contents and doesn't show `streaming/` at all) | any time, cosmetic only |
+| File | Why it needs to change | Which phase | Status |
+|---|---|---|---|
+| `pyproject.toml` | add `apache-flink`, `great-expectations`, `acryl-datahub` | §8, §9, §11 | `apache-flink` sidestepped entirely (§8 runs in an isolated ephemeral env, never touched this file — see §8); `great-expectations`/`acryl-datahub` still pending |
+| `infra/docker-compose.yml` | uncomment `airflow` service; add `datahub` service block | §10, §11 | pending |
+| `infra/trino/catalog/delta.properties` | add `delta.register-table-procedure.enabled=true` | §12 | ✅ done, approved — one line, Trino container restarted to pick it up |
+| `CLAUDE.md` | optionally add `pipelines/streaming/` and `dq/` suite filenames to the repo-structure tree (currently silent on exact `dq/` contents and doesn't show `streaming/` at all) | any time, cosmetic only | not done |
 
-## 14. Grading evidence checklist (Section 02 remainder only)
+## 15. Grading evidence checklist (Section 02 remainder only)
 
 - [ ] §4 — `DESCRIBE HISTORY` before/after Z-order; `EXPLAIN ANALYZE` seq-scan → index-scan
 - [ ] §5/§6/§7 — all xfail markers removed, full test suite green, `pytest --cov` unaffected elsewhere
 - [ ] §8 — Flink UI screenshots: backpressure HIGH→OK, `numLateRecordsDropped` >0→0, dedup query >0→0, windowed aggregation output
 - [ ] §9/§10 — Airflow UI green run screenshot for `dp1_bronze_dag`, `dp2_gold_dag`, `dp3_feature_dag`, each showing the validate task
+- [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL) tables all visible — tables are registered and queryable now, screenshot is the only remaining step
 - [ ] §11 — DataHub lineage graph screenshot per pipeline; assertions-passing screenshot; browse view across Bronze/Silver/Gold/Feature zones
+- [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL) tables all visible
 - [ ] `docs/02_spark_optimisation_report.md` Fix D/E/F sections repointed at `streaming/flink_stream_pipeline.py`

@@ -185,7 +185,17 @@ class CustomerFeature90d(PipelineBase):
         """Delete any prior rows for `snapshot_date` so re-running the job is
         idempotent. A no-op (logged, not raised) on a cold start where the
         table doesn't exist yet — Spark's JDBC writer creates it on first
-        write."""
+        write.
+
+        The psycopg2 connection's session timezone is set to match Spark's
+        (spark.sql.session.timeZone) before the DELETE. PySpark collects
+        timestamps as naive datetimes in the Spark session's local timezone;
+        without this, Postgres would interpret that naive value using its own
+        connection-default timezone instead, comparing against a different
+        instant than the one Spark's JDBC writer actually stored — silently
+        matching zero rows and turning every re-run into a duplicate-append
+        instead of a replace.
+        """
         try:
             with closing(psycopg2.connect(
                 host=self.postgres_host,
@@ -194,6 +204,7 @@ class CustomerFeature90d(PipelineBase):
                 user=self.postgres_user,
                 password=self.postgres_password,
             )) as conn, conn, conn.cursor() as cur:
+                cur.execute("SET TIME ZONE %s", (self.spark.conf.get("spark.sql.session.timeZone"),))
                 cur.execute(
                     f"DELETE FROM {self.GOLD_SCHEMA}.{self.FEAT_TABLE} "
                     f"WHERE event_timestamp = %s",
