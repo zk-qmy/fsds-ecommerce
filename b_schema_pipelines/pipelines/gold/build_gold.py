@@ -16,9 +16,11 @@ Run:
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
+import psycopg2
 from pyspark.sql import Window
 from pyspark.sql import functions as F
 
@@ -54,6 +56,9 @@ class GoldBuilder(PipelineBase):
         self.mode = mode
 
         pg_cfg = self.shared_cfg.get("postgres", {})
+        self.postgres_host = pg_cfg.get("host", "localhost")
+        self.postgres_port = pg_cfg.get("port", 5432)
+        self.postgres_db = pg_cfg.get("db", "fsds")
         self.postgres_user = pg_cfg.get("user", "fsds")
         self.postgres_password = pg_cfg.get("password", "fsds")
 
@@ -86,8 +91,46 @@ class GoldBuilder(PipelineBase):
                 except Exception as exc:
                     self.log_run(table, start_ts, datetime.now(), 0, 0, "error", str(exc))
                     raise
+            self._create_indexes()
         finally:
             self.spark.stop()
+
+    # ── private: storage optimization ───────────────────────────────────────
+
+    INDEX_STATEMENTS = (
+        ("idx_fact_order_customer_key", "fact_order", "customer_key"),
+        ("idx_fact_order_date_key", "fact_order", "order_date_key"),
+        ("idx_fact_order_item_order_key", "fact_order_item", "order_key"),
+        ("idx_fact_payment_order_key", "fact_payment_attempt", "order_key"),
+        ("idx_dim_customer_bk", "dim_customer", "customer_id, is_current"),
+    )
+
+    def _create_indexes(self) -> None:
+        """Postgres storage optimization — speeds up the join patterns Gold's
+        own downstream consumers (the feature jobs, ad-hoc BI queries) use
+        most: point lookups by customer_key/order_key, and dim_customer's
+        SCD2 lookup by business key. Table/columns match
+        docs/02_schema_piplines.md §8's indexing plan.
+
+        Uses a raw psycopg2 connection since Spark's JDBC writer only
+        appends/overwrites DataFrames — it can't run DDL.
+        """
+        with closing(psycopg2.connect(
+            host=self.postgres_host,
+            port=self.postgres_port,
+            dbname=self.postgres_db,
+            user=self.postgres_user,
+            password=self.postgres_password,
+        )) as conn, conn, conn.cursor() as cur:
+            for name, table, columns in self.INDEX_STATEMENTS:
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS {name} "
+                    f"ON {self.schema}.{table}({columns})"
+                )
+        self.logger.info(
+            "[indexes] created/verified %d indexes on %s",
+            len(self.INDEX_STATEMENTS), self.schema,
+        )
 
     # private: spark
 

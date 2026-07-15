@@ -194,6 +194,10 @@ uv run python b_schema_pipelines/pipelines/features/feat_customer_unified.py
 
 See [Local Services & Ports](#local-services--ports) for MinIO/Postgres/Spark UI access.
 
+**ER diagram** — `gold_ecommerce` dims/facts/OBT plus the `feat_*` feature tables (DBeaver → right-click schema → **View Diagram**):
+
+![gold_ecommerce + feature tables ER diagram](assets/database.png)
+
 ### Cleanup
 
 ```bash

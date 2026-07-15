@@ -98,3 +98,16 @@ class DeltaWriter:
     def optimize(self, output_path: str) -> None:
         """Compact small files in the Delta table."""
         self.load(output_path).optimize().executeCompaction()
+
+    def z_order(self, output_path: str, columns: list[str]) -> None:
+        """Z-order the Delta table by `columns` — co-locates rows on disk so a
+        filter on those columns skips more files, instead of scanning
+        (nearly) every file regardless of the predicate. Run after write(),
+        on the columns a downstream query actually filters/joins on."""
+        t0 = datetime.now()
+        self.load(output_path).optimize().executeZOrderBy(*columns)
+        duration_ms = round((datetime.now() - t0).total_seconds() * 1000)
+        self.logger.info(
+            "[z_order] path=%s  columns=%s  duration_ms=%d",
+            output_path, columns, duration_ms,
+        )

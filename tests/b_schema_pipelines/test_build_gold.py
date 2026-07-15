@@ -718,6 +718,57 @@ def test_run_reraises_the_original_exception_after_logging(builder):
         builder.run()
 
 
+# ── storage optimization: _create_indexes ────────────────────────────────────
+
+def test_create_indexes_executes_one_statement_per_index(builder):
+    """5 indexes documented in docs/02_schema_piplines.md §8 — one CREATE
+    INDEX per statement, all idempotent (IF NOT EXISTS)."""
+    with patch("b_schema_pipelines.pipelines.gold.build_gold.psycopg2.connect") as mock_connect:
+        mock_cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        builder._create_indexes()
+
+    assert mock_cur.execute.call_count == len(GoldBuilder.INDEX_STATEMENTS) == 5
+    for call in mock_cur.execute.call_args_list:
+        sql = call.args[0]
+        assert sql.startswith("CREATE INDEX IF NOT EXISTS")
+
+
+def test_create_indexes_targets_the_documented_tables_and_columns(builder):
+    """Each index must land on the exact table/column pair
+    docs/02_schema_piplines.md §8 documents — a typo here silently produces
+    an index that never gets used by the query it was meant to speed up."""
+    with patch("b_schema_pipelines.pipelines.gold.build_gold.psycopg2.connect") as mock_connect:
+        mock_cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        builder._create_indexes()
+
+    executed_sql = " ".join(call.args[0] for call in mock_cur.execute.call_args_list)
+    assert "gold_ecommerce.fact_order(customer_key)" in executed_sql
+    assert "gold_ecommerce.fact_order(order_date_key)" in executed_sql
+    assert "gold_ecommerce.fact_order_item(order_key)" in executed_sql
+    assert "gold_ecommerce.fact_payment_attempt(order_key)" in executed_sql
+    assert "gold_ecommerce.dim_customer(customer_id, is_current)" in executed_sql
+
+
+def test_run_calls_create_indexes_after_all_tables_built(builder):
+    """_create_indexes must run only after every table exists — an index on
+    a table that doesn't exist yet would fail the whole run for no reason."""
+    call_order = []
+    builder_attrs = [
+        "_build_dim_date", "_build_dim_payment_method", "_build_dim_order_status",
+        "_build_dim_product", "_build_dim_customer", "_build_fact_order",
+        "_build_fact_order_item", "_build_fact_payment", "_build_obt_order_performance",
+    ]
+    for attr in builder_attrs:
+        setattr(builder, attr, MagicMock(side_effect=lambda a=attr: (call_order.append(a), 0)[1]))
+    builder._create_indexes = MagicMock(side_effect=lambda: call_order.append("_create_indexes"))
+    builder.spark = MagicMock()
+
+    builder.run()
+
+    assert call_order[-1] == "_create_indexes", "_create_indexes must run after every table builder"
+    assert call_order.count("_create_indexes") == 1
+
+
 # ── 20/21. Surrogate-key modes: baseline vs optimized ────────────────────────
 
 def test_optimized_surrogate_keys_match_baseline(spark):

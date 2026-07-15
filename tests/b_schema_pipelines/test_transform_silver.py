@@ -31,6 +31,7 @@ def transformer(spark):
     t = object.__new__(SilverTransformer)
     t.spark = spark
     t.schema_change_date = "2026-03-24"
+    t.silver_dir = "s3a://test-silver"
     t.run_id = "test_run"
     t.logger = MagicMock()
     t.log_run = MagicMock()  # avoids json.dumps(entry) with MagicMock row counts

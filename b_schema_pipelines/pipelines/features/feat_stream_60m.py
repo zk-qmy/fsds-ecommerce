@@ -213,6 +213,23 @@ class StreamFeature60m(PipelineBase):
                 "[%s] skip delete, table not yet created", self.FEAT_TABLE
             )
 
+    def _ensure_index(self) -> None:
+        """Point-in-time lookup index on (customer_id, event_timestamp) — the
+        join key feat_customer_unified.py's as-of join filters/joins on.
+        `IF NOT EXISTS` makes this a cheap no-op after the first successful
+        run; called after the write so the table is guaranteed to exist."""
+        with closing(psycopg2.connect(
+            host=self.postgres_host,
+            port=self.postgres_port,
+            dbname=self.postgres_db,
+            user=self.postgres_user,
+            password=self.postgres_password,
+        )) as conn, conn, conn.cursor() as cur:
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_{self.FEAT_TABLE}_pit "
+                f"ON {self.GOLD_SCHEMA}.{self.FEAT_TABLE}(customer_id, event_timestamp)"
+            )
+
     def _write(self, df) -> int:
         """Append features to PostgreSQL feat_stream_60m.
 
@@ -237,6 +254,7 @@ class StreamFeature60m(PipelineBase):
             .save()
         )
         df.unpersist()
+        self._ensure_index()
         return count
 
 

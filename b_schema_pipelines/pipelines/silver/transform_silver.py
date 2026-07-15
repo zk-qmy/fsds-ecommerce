@@ -181,6 +181,13 @@ class SilverTransformer(PipelineBase):
             "orders", orders_start, datetime.now(), orders_rows_in, rows_out, "ok"
         )
 
+        # Storage optimization — Z-order Silver orders by the columns the
+        # downstream 90-day rolling-window feature query actually filters
+        # on (order_timestamp range) and joins on (customer_id). Co-locates
+        # matching rows so that query scans a fraction of the files instead
+        # of nearly all of them.
+        self.writer.z_order(f"{self.silver_dir}/orders", ["order_timestamp", "customer_id"])
+
         # Fix 3 — dedup: remove duplicate order_items, keep earliest ingest_ts.
         # Same caching pattern: one S3A scan covers rows_in, window dedup, and write.
         items_start = datetime.now()
