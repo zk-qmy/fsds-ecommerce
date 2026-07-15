@@ -227,3 +227,4 @@ b_schema_pipelines/delta-lake-data/
 .claude/
 .ruff_cache/
 .pytest_cache/
+references/
