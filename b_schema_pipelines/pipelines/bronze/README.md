@@ -168,7 +168,14 @@ uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode ba
 uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
 ```
 
-Optional — override the schema change date (default `2026-03-24`):
+`--schema-change-date` (default `2026-03-24`) is accepted and stored on
+`SilverTransformer.schema_change_date`, but **`_fix_schema_evolution` doesn't currently read
+it** — the fix fills whichever `coupon_code`/`shipping_method` values are already `NULL`,
+regardless of date, so passing a different value here has no effect on Problem B's behavior
+today. Independent of `a_data_generator/config/generator_config.yaml`'s own `schema_change_date`
+(now a fraction of the sim window, not a fixed date — see
+`a_data_generator/docs/01_data_generator.md` §8.3), which actually controls which rows get
+NULLed at generation time.
 
 ```bash
 uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py \

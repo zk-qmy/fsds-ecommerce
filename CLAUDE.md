@@ -843,7 +843,11 @@ Before submitting each section, verify:
 Key config fields and what they control:
 
 ```yaml
-schema_change_date: "2026-03-01"   # ~50% of history falls before this → NULL coupon/shipping
+schema_change_date: 0.5            # fraction of [sim_start, sim_end], NOT an absolute date —
+                                    # the window itself slides with real time (sim_start/sim_end
+                                    # are anchored to datetime.now()), so a fixed calendar date
+                                    # would drift out of alignment; NULL coupon/shipping before
+                                    # the resolved point
 avg_orders_per_customer: 3.0       # Poisson λ for order count per customer
 avg_items_per_order: 2.5           # Poisson λ for items per order
 marketing_opt_in_rate: 0.70        # used as rng.random(n) < cfg["marketing_opt_in_rate"]

@@ -72,7 +72,7 @@ Business-ready Gold model for analytics and BI, plus implemented data pipelines 
 | Problem | Table | Detail | Handler |
 |---|---|---|---|
 | A — City skew | orders | 85% shipping_city = 'Ho Chi Minh City' | AQE `skewJoin.enabled=true` in Silver; Gold partitioned by city |
-| B — Schema evolution | orders | coupon_code + shipping_method NULL before 2026-03-24 | Silver: fill NULL → 'LEGACY' / 'UNKNOWN'; write with `mergeSchema=true` |
+| B — Schema evolution | orders | coupon_code + shipping_method NULL before `schema_change_date` (config: fraction `0.5` of the 180-day window, not a fixed date) | Silver: fill NULL → 'LEGACY' / 'UNKNOWN'; write with `mergeSchema=true` |
 | C — Duplicate rows | order_items | 2% duplicated by (order_id, product_id, unit_price) | Silver: Window rank on `created_ts asc`, keep rank=1 |
 | D — Burst traffic | events | 30x rate at 12:00–12:20 and 20:00–20:20 | Flink: watermarks + backpressure config |
 | E — Late arrivals | events | 12% events delayed 5–45 min | Flink: `WatermarkStrategy` + `AllowedLateness` |
@@ -415,6 +415,14 @@ they're exposed via Trino's Delta Lake connector (`infra/trino/catalog/delta.pro
 Add a second DBeaver connection using the **Trino** driver (`localhost:8080`, no auth) to
 browse `delta.bronze.*` / `delta.silver.*` alongside the `gold_ecommerce` PostgreSQL
 connection — all three zones visible across the two connections.
+
+Trino also has a second, `postgresql`-connector catalog (`infra/trino/catalog/postgres.properties`,
+`postgres` catalog) pointed at the same `fsds-postgres` instance, so `postgres.gold_ecommerce.*`
+is queryable through Trino too — not just via the direct PostgreSQL DBeaver connection above.
+This means a single Trino connection/query can join across all three zones in one statement
+(e.g. `delta.bronze.orders` joined to `postgres.gold_ecommerce.dim_customer`), which the two
+separate DBeaver connections above can't do — DBeaver's native PostgreSQL connection is still
+the better choice for just browsing Gold, but Trino is the tool for any cross-zone query.
 
 ### Pipeline Dependencies
 

@@ -98,3 +98,39 @@ def test_init_propagates_config_load_errors():
     ):
         with pytest.raises(FileNotFoundError):
             MinioClient()
+
+
+# ── 6. __init__ — MINIO_ENDPOINT env var override ────────────────────────────
+
+def test_minio_endpoint_env_var_overrides_yaml_default(monkeypatch):
+    """Lets ingest_bronze.py's bucket bootstrap run unmodified inside the
+    Airflow container, where "localhost" doesn't reach the sibling minio
+    container — docker-compose sets this for the airflow service only
+    (dags/plan.md §4)."""
+    monkeypatch.setenv("MINIO_ENDPOINT", "http://minio:9000")
+    with patch(
+        "b_schema_pipelines.pipelines.minio_client.load_config",
+        return_value=FAKE_CONFIG,
+    ), patch(
+        "b_schema_pipelines.pipelines.minio_client.boto3.client"
+    ) as mock_boto:
+        c = MinioClient()
+
+    assert c.endpoint == "http://minio:9000"
+    mock_boto.assert_called_once_with(
+        "s3",
+        endpoint_url="http://minio:9000",
+        aws_access_key_id="minio_access_key",
+        aws_secret_access_key="minio_secret_key",
+    )
+
+
+def test_minio_endpoint_falls_back_to_yaml_default_when_env_var_unset(monkeypatch):
+    monkeypatch.delenv("MINIO_ENDPOINT", raising=False)
+    with patch(
+        "b_schema_pipelines.pipelines.minio_client.load_config",
+        return_value=FAKE_CONFIG,
+    ), patch("b_schema_pipelines.pipelines.minio_client.boto3.client"):
+        c = MinioClient()
+
+    assert c.endpoint == "http://localhost:9000"

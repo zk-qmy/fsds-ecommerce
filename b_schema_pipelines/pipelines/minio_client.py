@@ -1,3 +1,5 @@
+import os
+
 import boto3
 from botocore.exceptions import ClientError
 from utils.config import load_config
@@ -8,7 +10,12 @@ class MinioClient:
         self.config = load_config(
             "b_schema_pipelines/pipelines/pipeline_config.yaml"
         )
-        self.endpoint = self.config["minio"]["endpoint"]
+        # MINIO_ENDPOINT overrides pipeline_config.yaml's minio.endpoint when set —
+        # falls back to the YAML value (localhost, for host-native runs) otherwise.
+        # Mirrors PipelineBase.__init__ (pipeline_base.py) so this bucket-bootstrap
+        # step also resolves the sibling minio container inside the Airflow
+        # container, where "localhost" doesn't reach it (dags/plan.md §4).
+        self.endpoint = os.environ.get("MINIO_ENDPOINT") or self.config["minio"]["endpoint"]
         self.access_key = self.config["minio"]["access_key"]
         self.secret_key = self.config["minio"]["secret_key"]
         self.s3_client = boto3.client(

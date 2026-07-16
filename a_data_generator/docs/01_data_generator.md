@@ -63,13 +63,13 @@ Payment statuses — 85% paid, 10% failed, 5% refunded; ~10% failure rate is rea
 **Downstream handler:** Silver — no fill; Gold — partitioned by `shipping_city`.
 
 #### Problem B — Schema evolution (compulsory)
-`orders.coupon_code` and `orders.shipping_method` are NULL for all orders placed before `schema_change_date` (~50% of the 180-day window, targeting 2026-03-24).
+`orders.coupon_code` and `orders.shipping_method` are NULL for all orders placed before `schema_change_date`. Configured as a **fraction of the 180-day window** (`0.5`), not a fixed calendar date — `sim_start`/`sim_end` are anchored to `datetime.now()` at generation time, so a literal date would drift out of alignment with the window as real time passes (this drift was the root cause of a CI failure — `test_schema_evolution_both_partitions_exist` — before the fix). The resolved calendar date therefore differs on every run; see §8.3 for one point-in-time example.
 
 **Why:** Schema evolution is unavoidable in production. Old partitions must be handled without breaking new-schema queries.
 
 **Downstream handler:** Silver — NULL → `'LEGACY'` (coupon_code), NULL → `'UNKNOWN'` (shipping_method).
 
-**Implementation note:** `schema_change_date` in config should be set to approximately 50% into the current 180-day window. If running after 2026-09-01, update it to remain at the midpoint (or use a float `0.5` which the loader interprets as a relative fraction of the window).
+**Implementation note (resolved):** `schema_change_date` used to be a fixed calendar date, which drifted out of alignment with the (real-time-anchored) window and eventually caused `test_schema_evolution_both_partitions_exist` to fail in CI. Config now sets it to the float `0.5`, which `_load_config` interprets as a relative fraction of `[sim_start, sim_end]` — this stays valid indefinitely, with no manual date maintenance required.
 
 #### Problem C — Duplicate rows in order_items (optional, chosen)
 2% of `order_items` rows are duplicated by natural key `(order_id, product_id, quantity, unit_price)`.
@@ -177,7 +177,7 @@ random_seed: 42
 # Offline problems
 skew_ratio_city: 0.85         # Problem A
 skew_ratio_category: 0.80
-schema_change_date: "2026-03-24"   # Problem B — ~50% into current window
+schema_change_date: 0.5       # Problem B — fraction into current window (not a fixed date)
 duplicate_rate_offline: 0.02  # Problem C
 
 # Streaming problems
@@ -283,6 +283,14 @@ Result: **PASS** — actual 85.1% is within ±2pp of target 85%.
 
 ### 8.3 Problem B — Schema evolution
 
+**Point-in-time example** — captured from a run on 2026-06-22, back when `schema_change_date`
+was still a fixed calendar date in config (since fixed as `0.5`, a fraction of the window — see
+the Implementation note above). The specific `schema_change_date` value and row counts below are
+illustrative for that one run, not literal constants — a fresh run today resolves the same
+`0.5` fraction against today's window instead, landing on a different calendar date but the same
+approximate ~15% split shown here (verified empirically when fixing
+`test_schema_evolution_both_partitions_exist` — see `tests/a_data_generator/test_config.yaml`).
+
 ```
 PROBLEM B -- Schema evolution (orders before schema_change_date):
   schema_change_date : 2026-03-24
@@ -294,7 +302,7 @@ PROBLEM B -- Schema evolution (orders before schema_change_date):
     shipping_method NULL:  0%    <- expected 0%    [PASS]
 ```
 
-54,063 orders fall before `schema_change_date` (~15% of the 180-day window from 2025-12-24 to 2026-06-22). All old-partition `coupon_code` and `shipping_method` values are NULL as required.
+54,063 orders fall before `schema_change_date` (~15% of the 180-day window from 2025-12-24 to 2026-06-22, this run). All old-partition `coupon_code` and `shipping_method` values are NULL as required.
 
 ### 8.4 Problem C — Duplicate rows in order_items
 

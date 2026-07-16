@@ -15,6 +15,7 @@ services:
       - ./trino/catalog:/etc/trino/catalog
     depends_on:
       - hive-metastore
+      - postgres
 
   # ── Metadata catalog ───────────────────────────────────────────────────────
   # We use PostgreSQL to store Hive metadata about
@@ -183,11 +184,31 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:        postgresql+psycopg2://fsds:fsds@postgres:5432/fsds
       AIRFLOW__CORE__LOAD_EXAMPLES:               "false"
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # Confirmed live: fsds-postgres itself reports `SHOW timezone` = Etc/UTC,
+      # but its `timestamp` (no tz) columns hold whatever wall-clock value was
+      # inserted -- and this project's data (generator.py, dags/*.py's
+      # `datetime.now()`-anchored windows) is produced on hosts running local
+      # Vietnam time (WSL2 observed at UTC+7). Without this, Airflow defaults
+      # to UTC internally, so DAG run timestamps/logs/UI clock sit 7h behind
+      # the wall-clock time the data itself was generated at. `default_timezone`
+      # governs both scheduling (interpretation of the naive `start_date`s in
+      # dp1/dp2/dp3) and log timestamps; `default_ui_timezone` only affects the
+      # webserver's displayed clock -- both are set so nothing is left on UTC.
+      AIRFLOW__CORE__DEFAULT_TIMEZONE:             Asia/Ho_Chi_Minh
+      AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE:     Asia/Ho_Chi_Minh
       # Default dags_folder is ~/airflow/dags -- doesn't exist anywhere in the
       # /opt/project bind mount. Confirmed live: without this, `airflow dags
       # list` reports "No data found", not an import error -- Airflow simply
       # never looks in the right place.
       AIRFLOW__CORE__DAGS_FOLDER:                  /opt/project/b_schema_pipelines/dags
+      # Default is 4 gunicorn sync workers -- each is a full process holding
+      # its own copy of the Flask app + DAG parse cache. On this host (~20GB
+      # RAM, WSL2 capped ~10GB) that was enough to push the VM into swap
+      # (confirmed live: `Worker was sent SIGKILL! Perhaps out of memory?`
+      # in webserver logs, plus WSL2 memory pressure destabilizing the
+      # VS Code Remote-WSL connection). 2 workers is enough for solo local
+      # dev traffic.
+      AIRFLOW__WEBSERVER__WORKERS:                  "2"
       MINIO_ENDPOINT:                              http://minio:9000
       # Fixed local-dev login instead of `airflow standalone`'s randomly
       # generated one-time password -- see the `command:` below for how.

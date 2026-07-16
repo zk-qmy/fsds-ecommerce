@@ -540,6 +540,16 @@ driver (host `localhost`, port `8080`, no auth) alongside the existing `gold_eco
 PostgreSQL connection, and a screenshot showing all three zones' tables. That's a manual,
 GUI-only step — nothing left to automate.
 
+**Update (post-implementation, 2026-07-16):** `infra/trino/catalog/postgres.properties` was
+added (`connector.name=postgresql`, pointed at the same `fsds-postgres` instance) — Trino now
+has a second catalog reaching `postgres.gold_ecommerce.*` directly, alongside the `delta`
+catalog above. Verified live: `SHOW CATALOGS` lists `delta`/`postgres`/`system`, and
+`SHOW TABLES FROM postgres.gold_ecommerce` lists all 12 Gold/feature tables. This means a
+single Trino connection can now query/join across Bronze, Silver, *and* Gold in one statement
+— the two-connection DBeaver setup above still works and is still the simpler way to just
+*browse* Gold (DBeaver's native PostgreSQL support is richer than its generic Trino/JDBC view),
+but it's no longer the only way to reach Gold data from Trino.
+
 ---
 
 ## 13. Sequencing
@@ -576,6 +586,7 @@ phase is reached:
 | `infra/airflow/Dockerfile` | new file — Airflow 2.10.5 image + `uv`-managed project venv | §10 | ✅ done, approved — see `dags/plan.md` §4 |
 | `.github/workflows/ci.yml` | new `dag-tests` job running `tests/dags/test_dags.py` in an ephemeral py3.12/airflow env | §10 (post-implementation review) | ✅ done, approved — was written but never wired into CI (silently import-skipped) until this fix |
 | `infra/trino/catalog/delta.properties` | add `delta.register-table-procedure.enabled=true` | §12 | ✅ done, approved — one line, Trino container restarted to pick it up |
+| `infra/trino/catalog/postgres.properties` | new file — `postgresql` connector catalog pointed at `fsds-postgres`, so Trino can reach `gold_ecommerce` directly | §12 (post-implementation) | ✅ done, approved — verified live (`SHOW CATALOGS`, `SHOW TABLES FROM postgres.gold_ecommerce`) |
 | `CLAUDE.md` | optionally add `pipelines/streaming/` and `dq/` suite filenames to the repo-structure tree (currently silent on exact `dq/` contents and doesn't show `streaming/` at all) | any time, cosmetic only | not done |
 
 ## 15. Grading evidence checklist (Section 02 remainder only)
@@ -584,7 +595,6 @@ phase is reached:
 - [ ] §5/§6/§7 — all xfail markers removed, full test suite green, `pytest --cov` unaffected elsewhere
 - [ ] §8 — Flink UI screenshots: backpressure HIGH→OK, `numLateRecordsDropped` >0→0, dedup query >0→0, windowed aggregation output
 - [ ] §9/§10 — Airflow UI green run screenshot for `dp1_bronze`, `dp2_gold`, `dp3_feature`, each showing the validate task (DAG code + unit tests are done and green; this live-cluster screenshot is the only remaining piece — **Unverified**, no live run captured yet)
-- [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL) tables all visible — tables are registered and queryable now, screenshot is the only remaining step
+- [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL, or via Trino's `postgres` catalog) tables all visible — tables are registered and queryable now, screenshot is the only remaining step
 - [ ] §11 — DataHub lineage graph screenshot per pipeline; assertions-passing screenshot; browse view across Bronze/Silver/Gold/Feature zones
-- [ ] §12 — DBeaver screenshot showing Bronze + Silver (via Trino) + Gold (via PostgreSQL) tables all visible
 - [ ] `docs/02_spark_optimisation_report.md` Fix D/E/F sections repointed at `streaming/flink_stream_pipeline.py`

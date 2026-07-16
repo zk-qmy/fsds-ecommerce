@@ -11,6 +11,7 @@ Predicts `will_purchase_next_session` for 120,000 customers across a 180-day his
 - [Local Services & Ports](#local-services--ports)
 - [Section 01 — Data Generator](#section-01--data-generator)
 - [Section 02 — Schema Pipelines](#section-02--schema-pipelines)
+- [Known Follow-ups](#known-follow-ups)
 - [Repository Structure](#repository-structure)
 - [Git Convention](#git-convention)
 
@@ -36,7 +37,7 @@ Started via `docker compose -f infra/docker-compose.yml up -d`, plus the Spark U
 | Service | URL | Port(s) | Login | Notes |
 |---|---|---|---|---|
 | [MinIO Console](http://localhost:9001) | http://localhost:9001 | 9001 (console), 9000 (S3 API) | `minio_access_key` / `minio_secret_key` | Bronze/Silver Delta Lake object storage |
-| [Trino Web UI](http://localhost:8080) | http://localhost:8080 | 8080 | — | Query engine, JDBC on same port |
+| [Trino Web UI](http://localhost:8080) | http://localhost:8080 | 8080 | — | Query engine, JDBC on same port — two catalogs: `delta` (Bronze/Silver on MinIO, via Hive Metastore) and `postgres` (Gold + feature tables), so it can join across both in one query |
 | Hive Metastore | `thrift://localhost:9083` | 9083 | — | Internal — Trino's catalog connection, no web UI |
 | Hive Metastore DB | `localhost:5433` | 5433→5432 | `hive` / `hive` | Postgres backing the metastore, not the Gold DB |
 | PostgreSQL (Gold + features) | `localhost:5432` | 5432 | `fsds` / `fsds` | `gold_ecommerce` schema, DB `fsds` |
@@ -117,7 +118,8 @@ Key fields:
 ```yaml
 n_customers: 120000
 random_seed: 42              # reproducible across runs
-schema_change_date: "2026-03-24"   # Problem B cutoff
+schema_change_date: 0.5            # Problem B cutoff -- fraction of the sim window, not a
+                                    # fixed date (the window itself slides with real time)
 duplicate_rate_offline: 0.02       # Problem C
 burst_multiplier: 30               # Problem D
 late_arrival_rate: 0.12            # Problem E
@@ -230,6 +232,24 @@ docker exec fsds-minio mc rb --force local/bronze-data
 $SPARK_HOME/sbin/stop-history-server.sh
 rm -rf /tmp/spark-events/*
 ```
+
+---
+
+## Known Follow-ups
+
+Not yet addressed — noted here rather than silently left inconsistent:
+
+- **`a_data_generator/outputs/` (committed `quality_report.txt` + parquet files) are stale.**
+  They reflect a run from before `schema_change_date` was changed from a fixed calendar date to
+  a fraction of the sim window (`0.5` — see `a_data_generator/docs/01_data_generator.md` §8.3).
+  Still internally consistent (they document what that one historical run produced), but a
+  fresh `uv run python a_data_generator/generator.py` would regenerate them against the current
+  config and current date.
+- **`transform_silver.py --schema-change-date` is a dead parameter.** It's accepted, stored on
+  `SilverTransformer.schema_change_date`, and documented in `bronze/README.md` as if it
+  controls Problem B's NULL-fill — but `_fix_schema_evolution` never actually reads it; the fix
+  fills whichever `coupon_code`/`shipping_method` values are already `NULL`, regardless of date.
+  Either wire it up (if the fix is meant to be date-gated) or drop the parameter.
 
 ---
 

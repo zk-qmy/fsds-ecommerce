@@ -4,7 +4,10 @@ days_history: 180
 skew_ratio_city: 0.85  # 85% HCMC
 skew_ratio_category: 0.80  # 80% Electronics
 duplicate_rate_offline: 0.02
-schema_change_date: "2026-03-24"
+schema_change_date: 0.5  # fraction of [sim_start, sim_end] -- NOT an absolute date. generator.py's
+                          # _load_config anchors sim_start/sim_end to datetime.now(), so a literal
+                          # calendar date drifts toward the window's edge as real time passes. A
+                          # float is resolved relative to the window every run, so it never drifts.
 base_events_per_min: 100
 burst_multiplier: 30
 burst_windows: ["12:00-12:20", "20:00-20:20"]

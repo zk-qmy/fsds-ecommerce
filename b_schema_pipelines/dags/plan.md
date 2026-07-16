@@ -151,6 +151,24 @@ infra/airflow/Dockerfile
   other, non-Airflow way of running these scripts is unaffected), and Postgres URLs are passed
   explicitly via each script's own `--postgres-url` CLI flag in the DAG files rather than
   relying on any implicit `localhost` resolution.
+- **Airflow's internal timezone set to `Asia/Ho_Chi_Minh` (post-implementation fix):**
+  confirmed live that `fsds-postgres` itself reports `SHOW timezone` = `Etc/UTC`, but its
+  `timestamp` (no-tz) Gold/feature columns hold whatever wall-clock value was written — and
+  this project's data (`a_data_generator/generator.py`, the DAG `start_date`s below) is produced
+  by `datetime.now()` on hosts running local Vietnam time (WSL2 observed at `UTC+7`). Airflow
+  otherwise defaults to UTC internally, so DAG run timestamps/logs/UI clock sat 7h behind the
+  wall-clock time the data itself represents. Fixed via two env vars on the `airflow` service in
+  `infra/docker-compose.yml` — `AIRFLOW__CORE__DEFAULT_TIMEZONE` (governs scheduling: how the
+  naive `start_date=datetime(2026, 1, 1)` in each DAG file below is localized, plus log
+  timestamps) and `AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE` (governs only the webserver's
+  displayed clock — without it the UI would still show UTC even though the scheduler runs on
+  GMT+7). `Asia/Ho_Chi_Minh` was used rather than a bare `+07:00` offset because it's a real IANA
+  zone (no DST, matches the observed `+07`) — what Airflow/pendulum expect. Verified live:
+  `airflow.settings.TIMEZONE` reports `Asia/Ho_Chi_Minh` post-recreate, and `dp1_bronze`'s
+  `0 0 * * *` schedule now computes `next_dagrun` = `17:00:00 UTC` (= midnight local GMT+7,
+  previously midnight UTC) — confirms cron interpretation actually shifted, not just the config
+  value. No DAG file changes needed — `default_timezone` applies globally, and none of the three
+  DAGs set a per-DAG `timezone=` override.
 
 ### How a task actually runs
 
@@ -473,6 +491,28 @@ introducing a stricter bar for just the DAG code.
   Fixed by adding a second `dag-tests` job to `ci.yml` that runs the exact command this file's
   docstring already specifies — closes CLAUDE.md's Track A CI requirement ("DAG import check
   (no circular dependencies)") for real, not just on paper.
+- **`ingest_bronze`'s bucket-bootstrap step (`MinioClient`) doesn't honor the `MINIO_ENDPOINT`
+  override, unlike every other pipeline stage.** Found via a real end-to-end `dp1_bronze`
+  trigger inside the Airflow container (after wiring up the one-time `repo_root`
+  Variable/`fsds_minio`/`fsds_postgres` Connections from §10, previously never done in this dev
+  container): the task failed with `EndpointConnectionError`, `"Could not connect to the
+  endpoint URL: http://localhost:9000/bronze-data"`. Root cause: `MinioClient.__init__`
+  (`pipelines/minio_client.py`) reads `self.endpoint` straight from `pipeline_config.yaml`
+  (hardcoded `http://localhost:9000`) and, unlike `PipelineBase.__init__` (§4's `MINIO_ENDPOINT`
+  bullet above), never checks the env var override — so inside the Airflow container, where
+  MinIO is only reachable at `minio:9000`, `create_bucket` fails before `ingest_bronze.py` ever
+  reaches its actual ingest logic. Confirmed pre-existing and unrelated to the timezone fix
+  above (`git diff` showed zero prior changes to this file). **Plan:** mirror
+  `PipelineBase.__init__`'s exact pattern — `self.endpoint = os.environ.get("MINIO_ENDPOINT") or
+  self.config["minio"]["endpoint"]` — so host-native runs keep resolving to the YAML default
+  (`localhost:9000`, env var unset) and the Airflow container resolves to `minio:9000` (env var
+  set by `infra/docker-compose.yml`, same as `pipeline_base.py` already does), with no argument
+  or call-site changes needed anywhere. Two new tests added to `tests/b_schema_pipelines/
+  test_minio_client.py` mirroring `test_pipeline_base.py`'s existing
+  `test_minio_endpoint_env_var_overrides_yaml_default` /
+  `test_minio_endpoint_falls_back_to_yaml_default_when_env_var_unset` pair. **Fixed** — see the
+  `pipelines/minio_client.py` diff; re-verified live with a second `dp1_bronze` trigger inside
+  the same container, which now reaches `create_bucket` successfully.
 
 ---
 
@@ -511,3 +551,39 @@ touching):
   limitation") remains an accepted, unfixed trade-off — considered adding a drift-detection
   test (e.g. parsing `build_gold.py`'s AST for `.select(...)` calls) during this review and
   rejected it as more complexity than a coursework-scale, already-documented risk warrants.
+
+---
+
+## 16. Running locally — from `docker compose up` to a green DAG
+
+```bash
+# 1. Source data must exist first (ingest_bronze reads from here)
+uv run python a_data_generator/generator.py
+
+# 2. Start Airflow — depends_on brings up postgres + minio too
+docker compose -f infra/docker-compose.yml up -d airflow
+docker compose -f infra/docker-compose.yml logs -f airflow   # wait for "Airflow is ready", then Ctrl-C
+```
+
+UI: **http://localhost:8081** — login `admin` / `admin` (fixed, pre-created; not `standalone`'s
+random one-time password). If it won't load, check `docker compose ... ps airflow` is `Up`.
+
+```bash
+# 3. One-time Variables/Connections (§10) — required before triggering; persists across
+#    restarts, so only needed once. `connections add` erroring means it's already set.
+AF="docker compose -f infra/docker-compose.yml exec airflow airflow"
+$AF variables set repo_root /opt/project
+$AF connections add fsds_minio --conn-type http --conn-host minio --conn-port 9000 \
+  --conn-login minio_access_key --conn-password minio_secret_key
+$AF connections add fsds_postgres --conn-type postgres --conn-host postgres --conn-port 5432 \
+  --conn-schema fsds --conn-login fsds --conn-password fsds
+
+# 4. Unpause + trigger all three directly. dp2_gold/dp3_feature normally wait on their
+#    upstream DAG via ExternalTaskSensor (§7, §8), but a manually-triggered logical date
+#    won't line up with that sensor lookup, so trigger them directly for a smoke test.
+$AF dags unpause dp1_bronze && $AF dags unpause dp2_gold && $AF dags unpause dp3_feature
+$AF dags trigger dp1_bronze && $AF dags trigger dp2_gold && $AF dags trigger dp3_feature
+
+# 5. Verify — expect state=success; the same UI Grid view is the rubric's screenshot proof
+$AF dags list-runs -d dp1_bronze
+```

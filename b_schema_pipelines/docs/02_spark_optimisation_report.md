@@ -83,7 +83,9 @@ Screenshot to capture: **balanced task duration histogram with no outlier bar.**
 ### What was injected
 
 `orders.coupon_code` and `orders.shipping_method` are `NULL` for every row where
-`order_timestamp < 2026-03-24` (the schema change date, ~50 % of the 180-day window).
+`order_timestamp < schema_change_date`. Configured in `generator_config.yaml` as the fraction
+`0.5` of the 180-day window (not a fixed calendar date — the window itself slides with real
+time, so a literal date would drift; see `a_data_generator/docs/01_data_generator.md` §8.3).
 This simulates a schema that gained new columns mid-history.
 
 ### How to identify — data inspection (not Spark UI)
