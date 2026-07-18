@@ -15,6 +15,12 @@ Predicts `will_purchase_next_session` for 120,000 customers across a 180-day his
 - [Repository Structure](#repository-structure)
 - [Git Convention](#git-convention)
 
+**Rubric compliance**: [`docs/new-plan.md`](docs/new-plan.md) has the full item-by-item audit
+against `coursework/rubrics.md`'s Data Platform track (what's done, what's proof-incomplete,
+what's not started). Each pipeline stage's own README below also carries a "Rubric proof
+checklist" section scoped to just that stage. [`docs/novel_ideas.md`](docs/novel_ideas.md)
+covers the two Novel Ideas line items.
+
 ---
 
 ## Setup
@@ -200,10 +206,13 @@ docker compose -f infra/docker-compose.yml up -d airflow
 # dp1_bronze first (the other two wait on it via ExternalTaskSensor)
 ```
 
-**Unverified** — this hasn't been run against a live cluster in this repo yet; DAG code and its
-unit/import tests (`tests/dags/test_dags.py`, run via the ephemeral env `dags/plan.md` §13
-documents) are green, but the live `docker compose up` + Airflow UI screenshot the rubric
-scores is still outstanding.
+**Verified working, screenshot still outstanding** — all three DAGs have run green
+end-to-end (confirmed via CLI/API this session, on both DAG-graph-shape tests
+(`tests/dags/test_dags.py`) and a live cluster run — see
+[`b_schema_pipelines/dags/plan.md`](b_schema_pipelines/dags/plan.md)'s "Status" note at the
+end of §16 for the full account). What's still missing for full rubric credit is the literal
+Airflow UI screenshot ("stages and their order") — the DAG **Graph view** satisfies this per
+the rubric's exact wording, not the DAGs-list view.
 
 ### Outputs
 
@@ -269,7 +278,7 @@ fsds-ecommerce/
 │   │   ├── bronze/               # ingest_bronze.py + README.md
 │   │   ├── silver/                # transform_silver.py
 │   │   ├── gold/                    # build_gold.py + README.md
-│   │   ├── features/              # feat_customer_90d.py, feat_stream_60m.py, feat_customer_unified.py, sum.md
+│   │   ├── features/              # feat_customer_90d.py, feat_stream_60m.py, feat_customer_unified.py
 │   │   ├── streaming/               # flink_stream_pipeline.py + README.md (own Python 3.12 env)
 │   │   ├── common/                 # delta_writer.py
 │   │   └── pipeline_config.yaml    # shared MinIO/Postgres/Delta config

@@ -1,0 +1,205 @@
+n_customers: 120000
+n_products: 45000
+days_history: 180
+skew_ratio_city: 0.85  # 85% HCMC
+skew_ratio_category: 0.80  # 80% Electronics
+duplicate_rate_offline: 0.02
+schema_change_date: 0.5  # fraction of [sim_start, sim_end] -- NOT an absolute date. generator.py's
+                          # _load_config anchors sim_start/sim_end to datetime.now(), so a literal
+                          # calendar date drifts toward the window's edge as real time passes. A
+                          # float is resolved relative to the window every run, so it never drifts.
+base_events_per_min: 100
+burst_multiplier: 30
+burst_windows: ["12:00-12:20", "20:00-20:20"]
+late_arrival_rate: 0.12
+late_delay_min_max: [5, 45]
+duplicate_rate_stream: 0.015
+random_seed: 42
+avg_orders_per_customer: 3.0    # controls order volume via Poisson draw
+avg_items_per_order: 2.5        # controls order_items volume
+marketing_opt_in_rate: 0.7   # 70% of customers opt in for marketing
+
+# ── Countries (customer) ─────────────────────────────────────────
+countries:
+  - VN
+  - US
+  - JP
+  - KR
+  - CN
+countries_distribution:
+  VN: 0.90
+  US: auto
+  JP: auto
+  KR: auto
+  CN: auto
+# ── Cities (shipping) ─────────────────────────────────────────
+cities:
+  - Ho Chi Minh City
+  - Hanoi
+  - Da Nang
+  - Can Tho
+  - Bien Hoa
+
+cities_distribution:
+  Ho Chi Minh City: 0.85
+  Hanoi: auto
+  Da Nang: auto
+  Can Tho: auto
+  Bien Hoa: auto
+ 
+# ── Product categories ────────────────────────────────────────
+product_categories:
+  - electronics
+  - fashion
+  - home_living
+  - beauty
+  - sports
+  - books
+  - grocery
+  - toys
+category_distribution:
+  electronics: 0.8
+  fashion: auto
+  home_living: auto
+  beauty: auto
+  sports: auto
+  books: auto
+  grocery: auto
+  toys: auto
+
+# Branch
+
+brands:
+  - category: "electronics"
+    brands:
+      - {name: "Samsung",  weight: 0.30}
+      - {name: "Apple",    weight: 0.25}
+      - {name: "Sony",     weight: 0.20}
+      - {name: "LG",       weight: 0.15}
+      - {name: "Dell",     weight: 0.10}
+  - category: "fashion"
+    brands:
+      - {name: "Zara",     weight: 0.25}
+      - {name: "H&M",      weight: 0.25}
+      - {name: "Uniqlo",   weight: 0.20}
+      - {name: "Nike",     weight: 0.15}
+      - {name: "Adidas",   weight: 0.15}
+  - category: "home_living"
+    brands:
+      - {name: "IKEA",               weight: 0.20}
+      - {name: "Home Depot",         weight: 0.25}
+      - {name: "Lowe's",             weight: 0.25}
+      - {name: "Wayfair",            weight: 0.15}
+      - {name: "Bed Bath & Beyond",  weight: 0.15}
+  - category: "beauty"
+    brands:
+      - {name: "L'Oreal",    weight: 0.30}
+      - {name: "Maybelline", weight: 0.25}
+      - {name: "Nivea",      weight: 0.20}
+      - {name: "Dove",       weight: 0.15}
+      - {name: "Clinique",   weight: 0.10}
+  - category: "sports"
+    brands:
+      - {name: "Nike",          weight: 0.25}
+      - {name: "Adidas",        weight: 0.25}
+      - {name: "Under Armour",  weight: 0.20}
+      - {name: "Puma",          weight: 0.15}
+      - {name: "Reebok",        weight: 0.15}
+  - category: "books"
+    brands:
+      - {name: "Penguin",           weight: 0.30}
+      - {name: "HarperCollins",     weight: 0.25}
+      - {name: "Simon & Schuster",  weight: 0.20}
+      - {name: "Hachette",          weight: 0.15}
+      - {name: "Macmillan",         weight: 0.10}
+  - category: "grocery"
+    brands:
+      - {name: "Walmart",      weight: 0.25}
+      - {name: "Kroger",       weight: 0.25}
+      - {name: "Costco",       weight: 0.20}
+      - {name: "Whole Foods",  weight: 0.15}
+      - {name: "Aldi",         weight: 0.15}
+  - category: "toys"
+    brands:
+      - {name: "LEGO",          weight: 0.30}
+      - {name: "Hasbro",        weight: 0.25}
+      - {name: "Mattel",        weight: 0.20}
+      - {name: "Fisher-Price",  weight: 0.15}
+      - {name: "Nerf",          weight: 0.10}
+
+# Price ranges for each category to generate realistic prices
+price_range:
+  electronics: [100, 2000]
+  fashion: [20, 500]
+  home_living: [30, 1500]
+  beauty: [10, 300]
+  sports: [25, 1200]
+  books: [5, 100]
+  grocery: [1, 50]
+  toys: [15, 400]
+ 
+# ── Customer segments ─────────────────────────────────────────
+customer_segments:
+  - gold
+  - silver
+  - bronze
+customer_segment_distribution:
+  gold: 0.1
+  silver: 0.3
+  bronze: 0.6
+ 
+# ── Payment methods ───────────────────────────────────────────
+payment_methods:
+  - credit_card
+  - bank_transfer
+  - e_wallet
+  - cod
+payment_method_distribution:
+  credit_card: 0.4
+  bank_transfer: 0.25
+  e_wallet: 0.25
+  cod: 0.1
+payment_statuses:
+  - paid
+  - failed
+  - refunded
+payment_status_distribution:
+  paid: 0.85
+  failed: 0.1
+  refunded: 0.05
+
+# ── Shipping methods ──────────────────────────────────────────
+shipping_methods:
+  - standard
+  - express
+  - same_day
+shipping_method_distribution:
+  standard: 0.7
+  express: 0.2
+  same_day: 0.1
+
+# ── Order statuses ────────────────────────────────────────────
+order_statuses:
+  - completed
+  - pending
+  - cancelled
+  - returned
+order_status_distribution:
+  completed: 0.8
+  pending: 0.05
+  cancelled: 0.1
+  returned: 0.05
+ 
+# ── Event types ───────────────────────────────────────────────
+event_types:
+  - view
+  - add_to_cart
+  - checkout
+  - purchase
+  - payment_failed
+event_type_distribution:
+  view: 0.50
+  add_to_cart: 0.20
+  checkout: 0.12
+  purchase: 0.10
+  payment_failed: 0.08

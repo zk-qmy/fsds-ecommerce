@@ -65,6 +65,15 @@ class PipelineBase(ABC):
         builder = (
             SparkSession.builder.master(f"local[{n_cores}]")
             .appName(app_name)
+            # Default is 200 — fine for a real cluster, wasteful here: local
+            # runs never exceed a few hundred thousand rows, so 200 shuffle
+            # partitions means most tasks process a handful of rows each,
+            # and per-task scheduling overhead ends up dominating actual
+            # work (confirmed live — Bronze/Silver/Gold runs routinely
+            # showed "Stage N: .../200" for datasets this small). Scaling
+            # with n_cores keeps enough parallelism to use every core
+            # without paying for hundreds of near-empty tasks.
+            .config("spark.sql.shuffle.partitions", str(n_cores * 3))
             # Delta Lake extensions
             .config("spark.sql.extensions",
                     "io.delta.sql.DeltaSparkSessionExtension")

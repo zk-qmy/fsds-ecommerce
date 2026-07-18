@@ -223,6 +223,7 @@ coursework/
 a_data_generator/outputs/*.csv
 # Temporary ignore
 b_schema_pipelines/delta-lake-data/
+b_schema_pipelines/streaming_data/
 
 .claude/
 .ruff_cache/

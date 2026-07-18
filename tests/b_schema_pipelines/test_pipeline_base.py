@@ -219,6 +219,45 @@ def test_create_spark_session_configures_delta_and_s3a(monkeypatch):
     assert calls["spark.hadoop.fs.s3a.secret.key"] == p.shared_cfg["minio"]["secret_key"]
 
 
+def test_create_spark_session_shuffle_partitions_scales_with_cores(monkeypatch):
+    """Default (200) wastes per-task scheduling overhead on local datasets
+    this small — must scale with the same n_cores used for local[n_cores],
+    not the Spark default."""
+    calls = {}
+
+    class FakeBuilder:
+        def master(self, master_str):
+            calls["master"] = master_str
+            return self
+
+        def appName(self, *a):
+            return self
+
+        def config(self, key, value):
+            calls[key] = value
+            return self
+
+        def getOrCreate(self):
+            return MagicMock()
+
+    monkeypatch.setattr(
+        "b_schema_pipelines.pipelines.pipeline_base.SparkSession.builder",
+        FakeBuilder(),
+    )
+    monkeypatch.setattr("os.cpu_count", lambda: 8)
+
+    class ConfigCheckPipeline(PipelineBase):
+        PREFIX = "cfgcheck"
+
+        def run(self):
+            pass
+
+    ConfigCheckPipeline()
+
+    assert calls["master"] == "local[6]"          # max(2, 8 - 2)
+    assert calls["spark.sql.shuffle.partitions"] == "18"   # n_cores * 3
+
+
 def test_each_subclass_has_own_prefix():
     class PipelineA(PipelineBase):
         PREFIX = "alpha"

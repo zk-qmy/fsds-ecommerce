@@ -761,12 +761,125 @@ def test_run_calls_create_indexes_after_all_tables_built(builder):
     for attr in builder_attrs:
         setattr(builder, attr, MagicMock(side_effect=lambda a=attr: (call_order.append(a), 0)[1]))
     builder._create_indexes = MagicMock(side_effect=lambda: call_order.append("_create_indexes"))
+    builder._create_foreign_keys = MagicMock(side_effect=lambda: call_order.append("_create_foreign_keys"))
+    builder._drop_foreign_keys = MagicMock(side_effect=lambda: call_order.append("_drop_foreign_keys"))
     builder.spark = MagicMock()
 
     builder.run()
 
-    assert call_order[-1] == "_create_indexes", "_create_indexes must run after every table builder"
+    assert call_order[-1] == "_create_indexes" or call_order[-1] == "_create_foreign_keys", \
+        "_create_indexes/_create_foreign_keys must run after every table builder"
     assert call_order.count("_create_indexes") == 1
+
+
+# ── dim/fact relationships: _drop_foreign_keys / _create_foreign_keys ───────
+
+def test_drop_foreign_keys_executes_one_statement_per_fk(builder):
+    """Every FK gets an idempotent, guarded DROP — safe even on a fresh
+    schema where none of these tables exist yet."""
+    with patch("b_schema_pipelines.pipelines.gold.build_gold.psycopg2.connect") as mock_connect:
+        mock_cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        builder._drop_foreign_keys()
+
+    assert mock_cur.execute.call_count == len(GoldBuilder.FOREIGN_KEY_STATEMENTS) == 8
+    for call in mock_cur.execute.call_args_list:
+        sql = call.args[0]
+        assert sql.startswith("ALTER TABLE IF EXISTS")
+        assert "DROP CONSTRAINT IF EXISTS" in sql
+
+
+def test_run_calls_drop_foreign_keys_before_any_table_built(builder):
+    """_drop_foreign_keys must run first — Spark's JDBC 'overwrite' mode
+    DROPs + recreates each fact table (_write_postgres), and Postgres
+    refuses to drop a table another table's FK still references. Running
+    this after any builder would risk exactly that failure on every run
+    after the first (once a previous run's _create_foreign_keys has landed)."""
+    call_order = []
+    builder_attrs = [
+        "_build_dim_date", "_build_dim_payment_method", "_build_dim_order_status",
+        "_build_dim_product", "_build_dim_customer", "_build_fact_order",
+        "_build_fact_order_item", "_build_fact_payment", "_build_obt_order_performance",
+    ]
+    for attr in builder_attrs:
+        setattr(builder, attr, MagicMock(side_effect=lambda a=attr: (call_order.append(a), 0)[1]))
+    builder._create_indexes = MagicMock(side_effect=lambda: call_order.append("_create_indexes"))
+    builder._create_foreign_keys = MagicMock(side_effect=lambda: call_order.append("_create_foreign_keys"))
+    builder._drop_foreign_keys = MagicMock(side_effect=lambda: call_order.append("_drop_foreign_keys"))
+    builder.spark = MagicMock()
+
+    builder.run()
+
+    assert call_order[0] == "_drop_foreign_keys", "_drop_foreign_keys must run before any table builder"
+    assert call_order.count("_drop_foreign_keys") == 1
+
+
+def test_create_foreign_keys_creates_primary_keys_before_foreign_keys(builder):
+    """FKs need a unique/PK target to reference — PK statements must all be
+    executed before any FK statement."""
+    with patch("b_schema_pipelines.pipelines.gold.build_gold.psycopg2.connect") as mock_connect:
+        mock_cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        builder._create_foreign_keys()
+
+    executed = [call.args[0] for call in mock_cur.execute.call_args_list]
+    last_pk_idx = max(i for i, sql in enumerate(executed) if "PRIMARY KEY" in sql)
+    first_fk_idx = min(i for i, sql in enumerate(executed) if "FOREIGN KEY" in sql)
+    assert last_pk_idx < first_fk_idx, "all PRIMARY KEY statements must run before any FOREIGN KEY statement"
+
+
+def test_create_foreign_keys_targets_the_documented_relationships(builder):
+    """Each FK must land on the exact dim/fact relationship the Gold schema
+    design documents — a typo here silently produces a constraint that
+    doesn't actually enforce (or render, in DBeaver) the intended edge."""
+    with patch("b_schema_pipelines.pipelines.gold.build_gold.psycopg2.connect") as mock_connect:
+        mock_cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        builder._create_foreign_keys()
+
+    executed_sql = " ".join(call.args[0] for call in mock_cur.execute.call_args_list)
+    for name, table, column, ref_table, ref_column in GoldBuilder.FOREIGN_KEY_STATEMENTS:
+        assert (
+            f"ALTER TABLE gold_ecommerce.{table} ADD CONSTRAINT {name} "
+            f"FOREIGN KEY ({column}) REFERENCES gold_ecommerce.{ref_table}({ref_column})"
+        ) in executed_sql
+
+
+def test_create_foreign_keys_adds_constraints_not_valid(builder):
+    """NOT VALID skips validating pre-existing rows at creation time — needed
+    because dim_date's rolling window can leave a handful of fact_order rows
+    just outside it (a documented generator/dim_date boundary mismatch, not
+    a pipeline bug); a validating ADD CONSTRAINT would abort the whole Gold
+    build over those few rows."""
+    with patch("b_schema_pipelines.pipelines.gold.build_gold.psycopg2.connect") as mock_connect:
+        mock_cur = mock_connect.return_value.cursor.return_value.__enter__.return_value
+        builder._create_foreign_keys()
+
+    fk_statements = [call.args[0] for call in mock_cur.execute.call_args_list if "FOREIGN KEY" in call.args[0]]
+    assert len(fk_statements) == len(GoldBuilder.FOREIGN_KEY_STATEMENTS) == 8
+    for sql in fk_statements:
+        assert sql.rstrip().endswith("NOT VALID")
+
+
+def test_run_calls_create_foreign_keys_after_create_indexes(builder):
+    """_create_foreign_keys must run last — after _create_indexes and after
+    every table exists for this run, since PKs/FKs reference columns on
+    tables that must already be (re)built."""
+    call_order = []
+    builder_attrs = [
+        "_build_dim_date", "_build_dim_payment_method", "_build_dim_order_status",
+        "_build_dim_product", "_build_dim_customer", "_build_fact_order",
+        "_build_fact_order_item", "_build_fact_payment", "_build_obt_order_performance",
+    ]
+    for attr in builder_attrs:
+        setattr(builder, attr, MagicMock(side_effect=lambda a=attr: (call_order.append(a), 0)[1]))
+    builder._create_indexes = MagicMock(side_effect=lambda: call_order.append("_create_indexes"))
+    builder._create_foreign_keys = MagicMock(side_effect=lambda: call_order.append("_create_foreign_keys"))
+    builder._drop_foreign_keys = MagicMock(side_effect=lambda: call_order.append("_drop_foreign_keys"))
+    builder.spark = MagicMock()
+
+    builder.run()
+
+    assert call_order[-1] == "_create_foreign_keys"
+    assert call_order[-2] == "_create_indexes"
+    assert call_order.count("_create_foreign_keys") == 1
 
 
 # ── 20/21. Surrogate-key modes: baseline vs optimized ────────────────────────
@@ -806,6 +919,30 @@ def test_optimized_surrogate_keys_are_gapfree_sequential(spark):
         for r in optimized_builder._assign_surrogate_keys(df, "order_key", "order_id").collect()
     )
     assert keys == list(range(1, n + 1))
+
+
+def test_optimized_surrogate_keys_unique_at_higher_partition_count(spark):
+    """Regression test: `ranked` (an intermediate DataFrame inside
+    _assign_surrogate_keys_optimized, consumed twice — once for
+    partition_counts, once for the final join) must be cached, or Spark's
+    independent re-execution of its lineage for each consumer can assign
+    spark_partition_id() differently across the two reads, producing
+    duplicate keys for different rows. Confirmed live against real data
+    (120K rows, 10 partitions): 813 customer_ids collided onto the same
+    customer_key before this was fixed with .cache() on `ranked`. Not
+    reliably reproduced by the small/low-partition tests above, so this
+    explicitly forces a higher partition count to exercise the same class
+    of bug."""
+    n = 2000
+    df = spark.createDataFrame([(f"O{str(i).zfill(5)}",) for i in range(n)], ["order_id"])
+    optimized_builder = _make_builder(spark, mode="optimized")
+    keys = sorted(
+        r["order_key"]
+        for r in optimized_builder._assign_surrogate_keys_optimized(
+            df, "order_key", "order_id", num_partitions=16
+        ).collect()
+    )
+    assert keys == list(range(1, n + 1)), "keys must be unique and gap-free at higher partition counts too"
 
 
 def test_invalid_mode_raises(spark):

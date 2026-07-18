@@ -70,6 +70,7 @@ class GoldBuilder(PipelineBase):
 
     def run(self) -> None:
         """Build all Gold tables in dependency order, then stop Spark (even on failure)."""
+        self._drop_foreign_keys()
         builders = (
             ("dim_date", self._build_dim_date),
             ("dim_payment_method", self._build_dim_payment_method),
@@ -92,6 +93,7 @@ class GoldBuilder(PipelineBase):
                     self.log_run(table, start_ts, datetime.now(), 0, 0, "error", str(exc))
                     raise
             self._create_indexes()
+            self._create_foreign_keys()
         finally:
             self.spark.stop()
 
@@ -130,6 +132,93 @@ class GoldBuilder(PipelineBase):
         self.logger.info(
             "[indexes] created/verified %d indexes on %s",
             len(self.INDEX_STATEMENTS), self.schema,
+        )
+
+    # ── private: dim/fact relationships (FK constraints) ────────────────────
+
+    # (table, column) pairs a FOREIGN_KEY_STATEMENTS entry below references.
+    # Every referenced column must be unique/PK for Postgres to allow the FK.
+    PRIMARY_KEY_STATEMENTS = (
+        ("dim_customer", "customer_key"),
+        ("dim_product", "product_key"),
+        ("dim_date", "date_key"),
+        ("dim_payment_method", "payment_method_key"),
+        ("dim_order_status", "order_status_key"),
+        ("fact_order", "order_key"),
+    )
+
+    # (constraint_name, table, column, ref_table, ref_column)
+    FOREIGN_KEY_STATEMENTS = (
+        ("fk_fact_order_customer", "fact_order", "customer_key", "dim_customer", "customer_key"),
+        ("fk_fact_order_date", "fact_order", "order_date_key", "dim_date", "date_key"),
+        ("fk_fact_order_status", "fact_order", "order_status_key", "dim_order_status", "order_status_key"),
+        ("fk_fact_order_item_order", "fact_order_item", "order_key", "fact_order", "order_key"),
+        ("fk_fact_order_item_product", "fact_order_item", "product_key", "dim_product", "product_key"),
+        ("fk_fact_payment_order", "fact_payment_attempt", "order_key", "fact_order", "order_key"),
+        ("fk_fact_payment_date", "fact_payment_attempt", "payment_date_key", "dim_date", "date_key"),
+        ("fk_fact_payment_method", "fact_payment_attempt", "payment_method_key", "dim_payment_method", "payment_method_key"),
+    )
+
+    def _pg_connect(self):
+        return psycopg2.connect(
+            host=self.postgres_host,
+            port=self.postgres_port,
+            dbname=self.postgres_db,
+            user=self.postgres_user,
+            password=self.postgres_password,
+        )
+
+    def _drop_foreign_keys(self) -> None:
+        """Must run before any table below is rebuilt. Every fact table is
+        rewritten via mode="overwrite" (Spark's JDBC writer DROPs + recreates
+        the table — see `_write_postgres`), and Postgres refuses to DROP a
+        table another table's FOREIGN KEY still references. Without this, a
+        constraint `_create_foreign_keys` added on run N would make run N+1's
+        `_build_fact_order` (etc.) fail outright — breaking the "re-running a
+        job must not fail/duplicate" rule every run after the first. Safe to
+        call before any Gold table exists yet (`IF EXISTS` on both the table
+        and the constraint) — a no-op on a fresh schema.
+        """
+        with closing(self._pg_connect()) as conn, conn, conn.cursor() as cur:
+            for name, table, *_ in self.FOREIGN_KEY_STATEMENTS:
+                cur.execute(
+                    f"ALTER TABLE IF EXISTS {self.schema}.{table} DROP CONSTRAINT IF EXISTS {name}"
+                )
+
+    def _create_foreign_keys(self) -> None:
+        """Declares real PK/FK constraints so DBeaver's ER diagram renders
+        dim/fact relationship lines — previously enforced only logically (in
+        code and the GX suites), not at the database level. Must run last,
+        after every table exists for this run: PKs first (FKs need a
+        unique/PK target to reference), then FKs.
+
+        FKs are added `NOT VALID` — Postgres still enforces them for every
+        row written from here on, but skips validating rows already in the
+        table at creation time. Needed because `dim_date` only covers a
+        rolling `days_history`-day window (`_build_dim_date`) while
+        `fact_order` can carry a small number of orders just outside it (a
+        documented, deterministic generator/dim_date boundary mismatch, a
+        fraction of a percent of rows, not a pipeline bug) — a normal
+        (validating) ADD CONSTRAINT would abort the entire Gold build over
+        those few rows.
+        """
+        with closing(self._pg_connect()) as conn, conn, conn.cursor() as cur:
+            for table, column in self.PRIMARY_KEY_STATEMENTS:
+                pk_name = f"{table}_pkey"
+                cur.execute(f"ALTER TABLE {self.schema}.{table} DROP CONSTRAINT IF EXISTS {pk_name}")
+                cur.execute(
+                    f"ALTER TABLE {self.schema}.{table} "
+                    f"ADD CONSTRAINT {pk_name} PRIMARY KEY ({column})"
+                )
+            for name, table, column, ref_table, ref_column in self.FOREIGN_KEY_STATEMENTS:
+                cur.execute(
+                    f"ALTER TABLE {self.schema}.{table} "
+                    f"ADD CONSTRAINT {name} FOREIGN KEY ({column}) "
+                    f"REFERENCES {self.schema}.{ref_table}({ref_column}) NOT VALID"
+                )
+        self.logger.info(
+            "[foreign_keys] created/verified %d primary keys, %d foreign keys on %s",
+            len(self.PRIMARY_KEY_STATEMENTS), len(self.FOREIGN_KEY_STATEMENTS), self.schema,
         )
 
     # private: spark
@@ -248,7 +337,18 @@ class GoldBuilder(PipelineBase):
         )
 
         local_rank_w = Window.partitionBy("_pid").orderBy(order_col)
-        ranked = ranged.withColumn("_local_rank", F.row_number().over(local_rank_w))
+        # Cached, not just computed — `ranked` is read twice below (once for
+        # partition_counts, once for the final join), and without a cached,
+        # single materialization here, Spark independently recomputes its
+        # full lineage for each read. spark_partition_id() is not guaranteed
+        # to assign the same _pid to the same rows across two separate
+        # executions of the same lazy plan — confirmed live: at higher
+        # parallelism (10 partitions), this produced duplicate customer_key
+        # values for 813 distinct customer_ids (partition_offsets computed
+        # from one _pid assignment, joined back against a different one).
+        # Not reproducible at the old parallelism=2 default — more
+        # partitions means more room for the two executions to disagree.
+        ranked = ranged.withColumn("_local_rank", F.row_number().over(local_rank_w)).cache()
 
         partition_counts = ranked.groupBy("_pid").agg(F.count(F.lit(1)).alias("_count"))
         offset_w = Window.orderBy("_pid").rowsBetween(Window.unboundedPreceding, -1)

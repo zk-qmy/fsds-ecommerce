@@ -36,6 +36,18 @@ from utils.config import load_config   # noqa: E402
 
 OFFLINE_TABLES = ["customers", "products", "orders", "order_items", "payments"]
 
+# Tables whose source data can legitimately contain rows that share the same
+# primary/merge key — order_items' Problem C duplicates copy the original
+# row's order_item_id, and events' Problem F duplicates were found (live,
+# against the real generated data) to sometimes land on the exact same
+# (event_id, event_timestamp) pair too, not just a "slightly shifted" one.
+# A primary-key-keyed MERGE can't be used for either (Delta forbids multiple
+# source rows matching one target row) without pre-deduping the source first
+# — which would silently remove the very duplicates Silver/Flink's dedup
+# fixes exist to demonstrate. Idempotency instead skips re-ingesting a
+# source_file already present in Bronze; see DeltaWriter.append_if_new_source.
+APPEND_IF_NEW_SOURCE_TABLES = {"order_items", "events"}
+
 
 class FileReader:
     """Reads raw Parquet (offline tables) and NDJSON (events)."""
@@ -169,13 +181,21 @@ class BronzeIngester(PipelineBase):
             input_rows = df.count()
             df = self._add_ingest_metadata(df, source_file)
             self._check_quality(df, table, input_rows)
-            rows_written = self.writer.write(
-                df,
-                self._table_path(table),
-                table,
-                mode="append",
-                row_count=input_rows,
-            )
+            if table in APPEND_IF_NEW_SOURCE_TABLES:
+                rows_written = self.writer.append_if_new_source(
+                    df,
+                    self._table_path(table),
+                    table,
+                    source_file=source_file,
+                    row_count=input_rows,
+                )
+            else:
+                rows_written = self.writer.merge(
+                    df,
+                    self._table_path(table),
+                    table,
+                    key_columns=self._PRIMARY_KEYS.get(table, []),
+                )
             df.unpersist()
             print(json.dumps({"status": "success", "table": table, "rows": rows_written}))
             self.log_run(table, start_ts, datetime.now(), input_rows, rows_written, "ok")

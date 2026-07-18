@@ -184,15 +184,135 @@ def test_ingest_offline_table_row_count_matches_source(ingester, spark, source_d
     assert delta_count == source_count
 
 
-def test_ingest_offline_table_append_mode(ingester, spark, tmp_path):
-    """Running twice appends — Bronze is append-only."""
+def test_ingest_offline_table_rerun_is_idempotent(ingester, spark, tmp_path):
+    """Running twice against an unchanged source must not duplicate rows —
+    CLAUDE.md: "Re-running a job must not produce duplicate rows." Bronze
+    upserts (MERGE) keyed on each table's primary key instead of blindly
+    appending, specifically because the source files here are static
+    snapshots (a_data_generator's output), not a new incremental batch per
+    run — re-ingesting the same snapshot must be a no-op on row count."""
     ingester._ingest_offline_table("customers")
     first_count = spark.read.format("delta").load(str(tmp_path / "bronze" / "customers")).count()
 
     ingester._ingest_offline_table("customers")
     second_count = spark.read.format("delta").load(str(tmp_path / "bronze" / "customers")).count()
 
-    assert second_count == first_count * 2
+    assert second_count == first_count
+
+
+def test_ingest_offline_table_rerun_updates_changed_row_in_place(ingester, spark, source_dir, tmp_path):
+    """A source row whose data changed between runs (same primary key)
+    updates its existing Bronze row instead of sitting alongside a stale
+    duplicate."""
+    ingester._ingest_offline_table("customers")
+
+    # Same customer_id (C001), different segment — simulates the source
+    # snapshot being regenerated with updated data for an existing entity.
+    T = datetime.datetime
+    spark.createDataFrame(
+        [("C001", T(2026, 1, 1), "VN", "platinum", True),
+         ("C002", T(2026, 1, 2), "US", "silver", False)],
+        ["customer_id", "signup_ts", "country", "segment", "marketing_opt_in"],
+    ).write.mode("overwrite").parquet(str(source_dir / "offline" / "customers.parquet"))
+
+    ingester._ingest_offline_table("customers")
+
+    result = spark.read.format("delta").load(str(tmp_path / "bronze" / "customers"))
+    assert result.count() == 2, "must still be 2 rows — an update, not a duplicate insert"
+    c001_segments = [r["segment"] for r in result.filter("customer_id = 'C001'").collect()]
+    assert c001_segments == ["platinum"], "the existing C001 row must reflect the updated value"
+
+
+def test_ingest_events_rerun_is_idempotent(ingester, spark, tmp_path):
+    """A second run against the same source_file must be a no-op — events,
+    like order_items, uses append_if_new_source rather than merge() (Problem
+    F's duplicates can legitimately share the same (event_id,
+    event_timestamp) pair, confirmed live against the real generated data —
+    a per-row MERGE can't be used here for the same reason as order_items)."""
+    ingester._ingest_events()
+    first_count = spark.read.format("delta").load(str(tmp_path / "bronze" / "events")).count()
+
+    ingester._ingest_events()
+    second_count = spark.read.format("delta").load(str(tmp_path / "bronze" / "events")).count()
+
+    assert second_count == first_count
+
+
+def test_ingest_order_items_preserves_problem_c_duplicate_order_item_id(ingester, spark, source_dir, tmp_path):
+    """order_items' injected Problem C duplicates copy the original row's
+    order_item_id too — they must survive ingestion into Bronze unchanged
+    (Bronze is a faithful copy; Silver's dedup fix is what's supposed to
+    remove them, not Bronze). A primary-key-keyed MERGE can't be used for
+    this table at all (Delta forbids multiple source rows matching one
+    target row) — confirms append_if_new_source is used instead."""
+    T = datetime.datetime
+    spark.createDataFrame(
+        [("OI001", "O001", "P001", 2, 999.0, 10.0, 1988.0, T(2026, 2, 1)),
+         ("OI001", "O001", "P001", 2, 999.0, 10.0, 1988.0, T(2026, 2, 1))],  # Problem C duplicate
+        ["order_item_id", "order_id", "product_id", "quantity", "unit_price", "discount", "line_total", "created_ts"],
+    ).write.mode("overwrite").parquet(str(source_dir / "offline" / "order_items.parquet"))
+
+    ingester._ingest_offline_table("order_items")
+
+    result = spark.read.format("delta").load(str(tmp_path / "bronze" / "order_items"))
+    assert result.filter("order_item_id = 'OI001'").count() == 2
+
+
+def test_ingest_order_items_rerun_is_idempotent(ingester, spark, tmp_path):
+    """A second run against the same source_file must be a no-op (skipped
+    entirely, not re-appended) — see APPEND_IF_NEW_SOURCE_TABLES."""
+    ingester._ingest_offline_table("order_items")
+    first_count = spark.read.format("delta").load(str(tmp_path / "bronze" / "order_items")).count()
+
+    ingester._ingest_offline_table("order_items")
+    second_count = spark.read.format("delta").load(str(tmp_path / "bronze" / "order_items")).count()
+
+    assert second_count == first_count
+
+
+def test_ingest_events_preserves_same_event_id_different_timestamp(ingester, spark, source_dir, tmp_path):
+    """Problem F's intentionally-injected near-duplicate event_ids (same
+    event_id, shifted event_timestamp) must survive ingestion unchanged —
+    that duplicate is meant to reach Silver/Flink so their own dedup fix has
+    something real to demonstrate, not be silently absorbed in Bronze."""
+    extra_event = {
+        "event_id": "E001", "event_type": "view", "customer_id": "C001",
+        "session_id": "S001", "product_id": "P001", "order_id": None,
+        "quantity": None, "price": None,
+        "event_timestamp": "2026-04-01 12:05:00",  # same event_id as E001, shifted timestamp
+        "created_ts": "2026-04-01 12:05:00",
+    }
+    with open(source_dir / "streaming" / "events.json", "a") as f:
+        f.write(json.dumps(extra_event) + "\n")
+
+    ingester._ingest_events()
+
+    result = spark.read.format("delta").load(str(tmp_path / "bronze" / "events"))
+    e001_rows = result.filter("event_id = 'E001'").collect()
+    assert len(e001_rows) == 2, "both the original and the shifted-timestamp E001 row must survive"
+
+
+def test_ingest_events_preserves_exact_duplicate_event_id_and_timestamp(ingester, spark, source_dir, tmp_path):
+    """Confirmed live against the real generated dataset: Problem F's
+    duplicates can land on the exact same (event_id, event_timestamp) pair,
+    not just a shifted one — this is why events uses append_if_new_source
+    rather than a (event_id, event_timestamp)-keyed merge(), which would
+    raise DELTA_MULTIPLE_SOURCE_ROW_MATCHING_TARGET_ROW_IN_MERGE on this
+    exact case."""
+    extra_event = {
+        "event_id": "E001", "event_type": "view", "customer_id": "C001",
+        "session_id": "S001", "product_id": "P001", "order_id": None,
+        "quantity": None, "price": None,
+        "event_timestamp": "2026-04-01 12:00:00",  # exact duplicate of E001
+        "created_ts": "2026-04-01 12:00:00",
+    }
+    with open(source_dir / "streaming" / "events.json", "a") as f:
+        f.write(json.dumps(extra_event) + "\n")
+
+    ingester._ingest_events()
+
+    result = spark.read.format("delta").load(str(tmp_path / "bronze" / "events"))
+    assert result.filter("event_id = 'E001'").count() == 2
 
 
 def test_ingest_offline_table_logs_success(ingester, capsys):

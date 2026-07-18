@@ -1,0 +1,17 @@
+.git
+.venv
+references
+notebooks
+assets
+coursework
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+a_data_generator/outputs
+b_schema_pipelines/delta_lake_data
+b_schema_pipelines/streaming_data
+logs
+reports
+*.log

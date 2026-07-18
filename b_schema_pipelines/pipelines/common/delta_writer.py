@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from delta.tables import DeltaTable
+from pyspark.sql import functions as F
 from config.logging import setup_logger
 
 
@@ -75,6 +76,105 @@ class DeltaWriter:
             duration_ms,
         )
         return row_count
+
+    def merge(
+        self,
+        df,
+        output_path: str,
+        table: str,
+        key_columns: list[str],
+        merge_schema: bool = True,
+    ) -> int:
+        """Upsert df into a Delta table, keyed on key_columns.
+
+        Makes ingestion idempotent (CLAUDE.md: "Re-running a job must not
+        produce duplicate rows") — re-running against an unchanged source
+        re-stamps matching rows in place instead of appending a second copy
+        of everything, and a source row whose non-key columns changed
+        between runs updates its existing row rather than sitting alongside
+        a stale duplicate. Falls back to a plain append when the table
+        doesn't exist yet — there's nothing to merge against on the first run.
+        """
+        row_count = df.count()
+        if not self.table_exists(output_path):
+            return self.write(
+                df, output_path, table, mode="append",
+                row_count=row_count, merge_schema=merge_schema,
+            )
+
+        t0 = datetime.now()
+        condition = " AND ".join(f"target.{c} = source.{c}" for c in key_columns)
+        self.logger.info(
+            "[%s] merging %d rows → %s  on (%s)",
+            table, row_count, output_path, ", ".join(key_columns),
+        )
+        target = self.load(output_path)
+        try:
+            (
+                target.alias("target")
+                .merge(df.alias("source"), condition)
+                .whenMatchedUpdateAll()
+                .whenNotMatchedInsertAll()
+                .execute()
+            )
+        except Exception as exc:
+            self.logger.error("[%s] merge failed: %s", table, exc)
+            raise
+
+        duration_ms = round((datetime.now() - t0).total_seconds() * 1000)
+        latest = self.load(output_path).history(1).collect()
+        row = latest[0].asDict() if latest else {}
+        metrics = row.get("operationMetrics") or {}
+        self.logger.info(
+            "[%s] delta_commit  version=%d  rows_source=%d  updated=%s  inserted=%s  duration_ms=%d",
+            table,
+            row.get("version", -1),
+            row_count,
+            metrics.get("numTargetRowsUpdated", "?"),
+            metrics.get("numTargetRowsInserted", "?"),
+            duration_ms,
+        )
+        return row_count
+
+    def append_if_new_source(
+        self,
+        df,
+        output_path: str,
+        table: str,
+        source_file: str,
+        row_count: int = 0,
+        merge_schema: bool = True,
+    ) -> int:
+        """Append-only idempotency for tables that can legitimately contain
+        same-key duplicate rows within a single source file — order_items'
+        injected Problem C duplicates copy the original row's
+        order_item_id too, so a primary-key-keyed `merge()` can't be used
+        here: Delta's MERGE forbids multiple source rows matching the same
+        target row, and pre-deduping the source before merge would silently
+        drop the very duplicates Silver's dedup fix exists to demonstrate.
+
+        Idempotency instead works at the source-file grain: skip the whole
+        append if this exact source_file is already present in the target
+        table. Correct for this repo's static demo source files, which
+        don't change content between re-runs of the same path.
+        """
+        if self.table_exists(output_path):
+            already_ingested = (
+                self.load(output_path).toDF()
+                .filter(F.col("source_file") == source_file)
+                .limit(1)
+                .count() > 0
+            )
+            if already_ingested:
+                self.logger.info(
+                    "[%s] source_file already ingested — skipping (idempotent no-op): %s",
+                    table, source_file,
+                )
+                return 0
+        return self.write(
+            df, output_path, table, mode="append",
+            row_count=row_count, merge_schema=merge_schema,
+        )
 
     def table_exists(self, output_path: str) -> bool:
         try:
