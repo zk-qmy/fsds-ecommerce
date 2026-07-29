@@ -229,3 +229,17 @@ b_schema_pipelines/streaming_data/
 .ruff_cache/
 .pytest_cache/
 references/
+
+# Terraform
+#   .terraform/ is the local provider plugin cache (can be 100MB+ per provider) —
+#   never commit it, `terraform init` recreates it. State files contain resource
+#   IDs/secrets and are meant to live in the configured remote backend, not git.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
