@@ -10,6 +10,9 @@ minio:
   secret_key: minio_secret_key
 
 postgres:
+  # host/port/db overridable via POSTGRES_HOST/PORT/DB env vars (topology, not
+  # secrets). user/password stay plaintext here for local dev only — must move
+  # to Vault before real deployment (CLAUDE.md's "secrets from Vault" rule).
   host: localhost
   port: 5432
   db: fsds
@@ -25,7 +28,10 @@ layers:
     local_path: ./b_schema_pipelines/delta_lake_data/silver
     bucket: silver-data
     prefix: silver
-  gold:
-    local_path: ./b_schema_pipelines/delta_lake_data/gold
-    bucket: gold-data
-    prefix: gold
+  # gold: commented out — Gold lives in PostgreSQL, not MinIO. build_gold.py
+  # never calls _resolve_s3_config("gold"); confirmed the gold-data bucket is
+  # empty.
+  # gold:
+  #   local_path: ./b_schema_pipelines/delta_lake_data/gold
+  #   bucket: gold-data
+  #   prefix: gold

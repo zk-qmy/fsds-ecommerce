@@ -168,12 +168,16 @@ services:
     # default; `docker info` showed Experimental: false here). Reaches sibling
     # containers by service hostname instead (postgres, minio — same pattern
     # hive-metastore already uses above for S3_ENDPOINT). pipeline_config.yaml's
-    # `minio.endpoint` is overridden via MINIO_ENDPOINT below
-    # (pipeline_base.py); Postgres URLs are passed explicitly via each script's
-    # own `--postgres-url` CLI flag in the DAG files, and the fsds_postgres/
-    # fsds_minio Airflow Connections (dags/plan.md §10) point at postgres/minio
-    # too — nothing here relies on "localhost" meaning anything but this
-    # container's own loopback.
+    # `minio.endpoint`/`postgres.host`/`postgres.port`/`postgres.db` are
+    # overridden via MINIO_ENDPOINT/POSTGRES_HOST/POSTGRES_PORT/POSTGRES_DB
+    # below (pipeline_base.py). Each DAG's own `--postgres-url` CLI flag only
+    # feeds Spark's JDBC writer — the raw psycopg2 connections build_gold.py/
+    # feat_*.py open directly (FK/index management, non-Spark reads) don't see
+    # that flag at all and need this env-var override too, or they fall back to
+    # pipeline_config.yaml's `localhost` and fail inside this container. The
+    # fsds_postgres/fsds_minio Airflow Connections (dags/plan.md §10) point at
+    # postgres/minio as well — nothing here relies on "localhost" meaning
+    # anything but this container's own loopback.
     depends_on:
       - postgres
       - minio
@@ -210,6 +214,9 @@ services:
       # dev traffic.
       AIRFLOW__WEBSERVER__WORKERS:                  "2"
       MINIO_ENDPOINT:                              http://minio:9000
+      POSTGRES_HOST:                                postgres
+      POSTGRES_PORT:                                "5432"
+      POSTGRES_DB:                                  fsds
       # Fixed local-dev login instead of `airflow standalone`'s randomly
       # generated one-time password -- see the `command:` below for how.
       _AIRFLOW_WWW_USER_USERNAME:                  admin
@@ -223,9 +230,9 @@ services:
       # picked up without rebuilding the image, matching the (unused) `spark`
       # service's documented pattern above.
       - ..:/opt/project
-      # Anonymous volume at the PARENT directory, not at .venv itself --
-      # confirmed live that mounting exactly at /opt/project/.venv makes `uv
-      # sync` unable to rebuild a stale venv: it can delete everything INSIDE
+      # Named volume at the PARENT directory, not at .venv itself -- confirmed
+      # live that mounting exactly at /opt/project/.venv makes `uv sync`
+      # unable to rebuild a stale venv: it can delete everything INSIDE
       # a mounted directory but can't rmdir the mountpoint itself ("Device or
       # resource busy"), and uv does exactly that rmdir when an existing venv's
       # Python interpreter no longer resolves (e.g. after an image rebuild).
@@ -233,7 +240,16 @@ services:
       # (/opt/venvs/project) is a plain, freely-recreatable subdirectory, never
       # a mountpoint -- and still isolates the Linux venv from a Windows-native
       # one the host repo's own .venv/ might have, same as before.
-      - /opt/venvs
+      #
+      # Named (airflow_venvs), not anonymous -- an anonymous volume isn't
+      # reliably kept across `docker compose up --force-recreate`, which
+      # silently turned every recreate into a full `uv sync --frozen` venv
+      # rebuild (measured live: ~5GB of disk writes on a single restart,
+      # under WSL2's already-slow cross-filesystem I/O to a Windows-drive
+      # bind mount -- a real contributor to the webserver missing its
+      # 120-second startup deadline). A named volume survives recreates, so
+      # `uv sync` is a fast no-op once the venv already matches uv.lock.
+      - airflow_venvs:/opt/venvs
       - airflow_logs:/opt/airflow/logs
     # uv sync builds/refreshes the project's own Python 3.13 venv from the
     # bind-mounted pyproject.toml/uv.lock on every container start (cheap when
@@ -264,4 +280,5 @@ volumes:
   postgres_data:
   # redis_data:
   airflow_logs:
+  airflow_venvs:
   #spark_ivy_cache:

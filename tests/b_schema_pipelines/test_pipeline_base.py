@@ -135,6 +135,43 @@ def test_minio_endpoint_falls_back_to_yaml_default_when_env_var_unset(monkeypatc
     assert pipeline.shared_cfg["minio"]["endpoint"] == yaml_default
 
 
+def test_postgres_host_env_var_overrides_yaml_default(monkeypatch):
+    """Same reasoning as MINIO_ENDPOINT — the raw psycopg2 connections
+    build_gold.py/feat_*.py open directly never see each DAG's --postgres-url
+    flag (that only feeds Spark's JDBC writer), so without this override they
+    always fell back to pipeline_config.yaml's localhost and failed inside the
+    Airflow container."""
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    pipeline = ConcretePipeline()
+    assert pipeline.shared_cfg["postgres"]["host"] == "postgres"
+
+
+def test_postgres_port_env_var_overrides_yaml_default(monkeypatch):
+    monkeypatch.setenv("POSTGRES_PORT", "5433")
+    pipeline = ConcretePipeline()
+    assert pipeline.shared_cfg["postgres"]["port"] == 5433
+
+
+def test_postgres_db_env_var_overrides_yaml_default(monkeypatch):
+    monkeypatch.setenv("POSTGRES_DB", "other_db")
+    pipeline = ConcretePipeline()
+    assert pipeline.shared_cfg["postgres"]["db"] == "other_db"
+
+
+def test_postgres_config_falls_back_to_yaml_default_when_env_vars_unset(monkeypatch):
+    from b_schema_pipelines.pipelines.utils.config import load_config
+
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("POSTGRES_PORT", raising=False)
+    monkeypatch.delenv("POSTGRES_DB", raising=False)
+    yaml_default = load_config(PipelineBase._SHARED_CONFIG)["postgres"]
+
+    pipeline = ConcretePipeline()
+    assert pipeline.shared_cfg["postgres"]["host"] == yaml_default["host"]
+    assert pipeline.shared_cfg["postgres"]["port"] == yaml_default["port"]
+    assert pipeline.shared_cfg["postgres"]["db"] == yaml_default["db"]
+
+
 # ── 6. log_run — level routing (drives Grafana/Loki alerting) ────────────────
 
 

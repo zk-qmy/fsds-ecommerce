@@ -46,6 +46,24 @@ class PipelineBase(ABC):
         minio_endpoint = os.environ.get("MINIO_ENDPOINT")
         if minio_endpoint:
             self.shared_cfg["minio"]["endpoint"] = minio_endpoint
+        # Same reasoning as MINIO_ENDPOINT above, for the raw psycopg2 connections
+        # every Gold/feature script opens directly (build_gold.py, feat_*.py) —
+        # those never went through --postgres-url (that flag only feeds Spark's
+        # JDBC writer), so they always fell back to pipeline_config.yaml's
+        # localhost default and failed with connection-refused inside the
+        # Airflow container. Host/port/db are topology, not secrets, so an env
+        # var is fine here; user/password intentionally still come from
+        # pipeline_config.yaml (see that file's own note) — swapping those for
+        # Vault-sourced credentials is a separate, larger follow-up.
+        postgres_host = os.environ.get("POSTGRES_HOST")
+        if postgres_host:
+            self.shared_cfg["postgres"]["host"] = postgres_host
+        postgres_port = os.environ.get("POSTGRES_PORT")
+        if postgres_port:
+            self.shared_cfg["postgres"]["port"] = int(postgres_port)
+        postgres_db = os.environ.get("POSTGRES_DB")
+        if postgres_db:
+            self.shared_cfg["postgres"]["db"] = postgres_db
         self.cfg: dict = load_config(config_file) if config_file else {}
         self.logger.info("Starting spark...")
         self.spark = self._create_spark_session(app_name=self.run_id)
