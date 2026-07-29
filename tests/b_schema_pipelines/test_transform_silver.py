@@ -30,7 +30,6 @@ def transformer(spark):
     """
     t = object.__new__(SilverTransformer)
     t.spark = spark
-    t.schema_change_date = "2026-03-24"
     t.silver_dir = "s3a://test-silver"
     t.run_id = "test_run"
     t.logger = MagicMock()
@@ -119,11 +118,31 @@ def test_fix_duplicates_no_duplicate_natural_keys(transformer, sample_order_item
     result = transformer._fix_duplicates(sample_order_items)
     dupes = (
         result
-        .groupBy("order_id", "product_id", "unit_price")
+        .groupBy("order_id", "product_id", "unit_price", "quantity")
         .count()
         .filter(F.col("count") > 1)
     )
     assert dupes.count() == 0, "Duplicate natural keys remain after dedup"
+
+
+def test_fix_duplicates_keeps_distinct_quantity_rows(transformer, spark):
+    """Same (order_id, product_id, unit_price) but different quantity is a real,
+    distinct row — not an injected duplicate — and must survive dedup.
+
+    Without `quantity` in the partition key, this collapses to 1 row and
+    silently destroys a genuine order_items row (found live against the real
+    generated dataset: 28 such false-positive collisions)."""
+    T = datetime.datetime
+    rows = [
+        ("OI101", "O101", "P001", 1, 10.0, 0.0, 10.0, T(2026, 2, 1, 10, 0), "src", "run"),
+        ("OI102", "O101", "P001", 2, 10.0, 0.0, 20.0, T(2026, 2, 1, 10, 0), "src", "run"),
+    ]
+    df = spark.createDataFrame(rows, schema=[
+        "order_item_id", "order_id", "product_id", "quantity", "unit_price",
+        "discount", "line_total", "ingest_ts", "source_file", "pipeline_run_id",
+    ])
+    result = transformer._fix_duplicates(df)
+    assert result.count() == 2, "Distinct-quantity rows sharing order/product/price must both survive"
 
 
 @pytest.mark.parametrize("order_id,product_id,unit_price,expected_rows", [
@@ -347,18 +366,6 @@ def test_init_accepts_explicit_dir_overrides(spark):
     assert t.silver_dir == "custom/silver"
 
 
-def test_init_default_schema_change_date(spark):
-    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
-        t = SilverTransformer()
-    assert t.schema_change_date == "2026-03-24"
-
-
-def test_init_custom_schema_change_date(spark):
-    with patch.object(SilverTransformer, "_build_spark", return_value=spark):
-        t = SilverTransformer(schema_change_date="2026-06-01")
-    assert t.schema_change_date == "2026-06-01"
-
-
 # ── 10. _run_optimized — row-count telemetry passed to log_run ───────────────
 
 def test_run_optimized_logs_rows_in_and_out_for_orders(
@@ -409,9 +416,6 @@ def test_main_default_mode_is_optimized(monkeypatch):
     captured = {}
 
     class FakeTransformer:
-        def __init__(self, schema_change_date):
-            captured["schema_change_date"] = schema_change_date
-
         def run(self, mode):
             captured["mode"] = mode
 
@@ -424,16 +428,12 @@ def test_main_default_mode_is_optimized(monkeypatch):
     main()
 
     assert captured["mode"] == "optimized"
-    assert captured["schema_change_date"] == "2026-03-24"
 
 
-def test_main_passes_custom_mode_and_schema_change_date(monkeypatch):
+def test_main_passes_custom_mode(monkeypatch):
     captured = {}
 
     class FakeTransformer:
-        def __init__(self, schema_change_date):
-            captured["schema_change_date"] = schema_change_date
-
         def run(self, mode):
             captured["mode"] = mode
 
@@ -442,19 +442,12 @@ def test_main_passes_custom_mode_and_schema_change_date(monkeypatch):
         FakeTransformer,
     )
     monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "transform_silver.py",
-            "--mode", "baseline",
-            "--schema-change-date", "2026-01-01",
-        ],
+        sys, "argv", ["transform_silver.py", "--mode", "baseline"],
     )
 
     main()
 
     assert captured["mode"] == "baseline"
-    assert captured["schema_change_date"] == "2026-01-01"
 
 
 def test_main_rejects_invalid_mode(monkeypatch):

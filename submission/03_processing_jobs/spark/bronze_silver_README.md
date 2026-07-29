@@ -65,6 +65,17 @@ re-appended a full duplicate copy every time. Surfaced when `build_gold.py`'s ne
 `PRIMARY KEY` constraint (see `gold/README.md`) failed with a real `UniqueViolation` — Bronze
 `products` had accumulated 6x duplication from repeated test runs, which cascaded into Gold.
 
+**Second bug, found live the same way:** `source_file` used to be stamped as the full absolute
+path (`str(self.source_dir / "offline" / f"{table}.parquet")`). The same physical file resolves
+to a *different* absolute path depending on whether the script runs on the host
+(`/mnt/d/fsds-ecommerce/...`) or inside the Airflow container (`/opt/project/...`) — so
+`append_if_new_source`'s exact-string comparison never recognized those as the same file.
+`order_items` and `events` each ended up ingested twice, once from each context (confirmed live:
+`order_items` had grown to 1,818,000 rows, exactly 2× the expected 909,000). Fixed by stamping
+`source_file` as a path *relative to* `source_dir` (e.g. `"offline/order_items.parquet"`,
+`_relative_source()`) instead — stable regardless of which absolute prefix the script is run
+under.
+
 ---
 
 ## Prerequisites
@@ -165,6 +176,9 @@ Full structured logs (run_id, timings, Delta commit metrics) are written to `log
 
 ## Silver Transformation Pipeline
 
+**Fuller writeup, including trade-offs, now lives in [`silver/README.md`](../silver/README.md)** —
+kept here too since Bronze/Silver have always been documented as one pipeline pair.
+
 Reads Bronze Delta tables from MinIO, applies four targeted fixes for the injected data problems, and writes clean Silver Delta tables back to MinIO.
 
 **Run Bronze first** — Silver reads from `s3a://bronze-data/bronze/`.
@@ -184,7 +198,7 @@ Always run **baseline first**, then **optimized**. The Spark UI screenshots from
 |---|---|---|
 | 1 — AQE skewJoin | A: 85% Ho Chi Minh City | Session config — Spark splits skewed partitions at runtime |
 | 2 — NULL fill | B: schema evolution | `coupon_code` NULL → `LEGACY`, `shipping_method` NULL → `UNKNOWN` |
-| 3 — Dedup | C: 2% duplicate rows | Keep earliest `created_ts` per `(order_id, product_id, unit_price)` |
+| 3 — Dedup | C: ~2% duplicate rows injected (keep=False measure), ~1% actually removable | Keep earliest `ingest_ts` (tiebreak `order_item_id`) per `(order_id, product_id, unit_price, quantity)` |
 | 4 — Broadcast join | A: products join | `SortMergeJoin` → `BroadcastHashJoin` (standalone demo, see note below) |
 
 > **Fix 4 note:** `_fix_broadcast_join` is a standalone demonstration method — call it manually after the optimized run to capture the Spark UI SQL tab screenshot showing exchange bytes drop to 0.
@@ -202,20 +216,17 @@ uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode ba
 uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py --mode optimized
 ```
 
-`--schema-change-date` (default `2026-03-24`) is accepted and stored on
-`SilverTransformer.schema_change_date`, but **`_fix_schema_evolution` doesn't currently read
-it** — the fix fills whichever `coupon_code`/`shipping_method` values are already `NULL`,
-regardless of date, so passing a different value here has no effect on Problem B's behavior
-today. Independent of `a_data_generator/config/generator_config.yaml`'s own `schema_change_date`
-(now a fraction of the sim window, not a fixed date — see
-`a_data_generator/docs/01_data_generator.md` §8.3), which actually controls which rows get
-NULLed at generation time.
-
-```bash
-uv run python3 b_schema_pipelines/pipelines/silver/transform_silver.py \
-    --mode optimized \
-    --schema-change-date 2026-03-01
-```
+`transform_silver.py` no longer takes a `--schema-change-date` flag — it used to be accepted
+and stored on `SilverTransformer.schema_change_date`, but `_fix_schema_evolution` never
+actually read it. That turned out to be masking a real bug rather than just dead code: NULL
+`coupon_code` meant two different things (no coupon used vs. schema didn't have the column
+yet), so the unconditional fill was mislabeling ~75-80% of modern no-coupon orders as
+`'LEGACY'`. Fixed at the root in the generator instead of by gating Silver's fill on a date —
+see [`silver/README.md`](../silver/README.md#trade-offs--things-worth-knowing-before-running-this)
+for the full explanation. `a_data_generator/config/generator_config.yaml`'s own
+`schema_change_date` (a fraction of the sim window, now persisted and reused across runs — see
+`a_data_generator/docs/01_data_generator.md` §Problem B) is what actually controls which rows
+get NULLed at generation time.
 
 Output is written to `s3a://silver-data/silver/` on MinIO.
 
@@ -223,7 +234,7 @@ Output is written to `s3a://silver-data/silver/` on MinIO.
 
 ```
 {"status": "success", "table": "orders",      "rows": 360000}   # rows_in > rows_out not logged here; see .log
-{"status": "success", "table": "order_items", "rows": ~890000}  # ~2% deduped from ~909000
+{"status": "success", "table": "order_items", "rows": ~900000}  # ~1% deduped from ~909000
 {"status": "success", "table": "products",    "rows": 45000}
 {"status": "success", "table": "customers",   "rows": 120000}
 {"status": "success", "table": "payments",    "rows": 360000}

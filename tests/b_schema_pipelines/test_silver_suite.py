@@ -117,14 +117,14 @@ def test_order_items_dedup_check_omitted_without_bronze_row_count():
     assert "expect_table_row_count_to_be_between" not in _types(suite)
 
 
-def test_order_items_dedup_check_targets_roughly_two_percent_reduction():
+def test_order_items_dedup_check_targets_roughly_one_percent_reduction():
     suite = silver_expectation_suite(
         "order_items", ORDER_ITEMS_COLUMNS, ["order_item_id"], bronze_row_count=909_000
     )
     dedup_check = next(e for e in suite.expectations if e.expectation_type == "expect_table_row_count_to_be_between")
-    # (1 - 0.02 - 0.01) .. (1 - 0.02 + 0.01) of 909,000
-    assert dedup_check.min_value == round(909_000 * 0.97)
-    assert dedup_check.max_value == round(909_000 * 0.99)
+    # (1 - 0.01 - 0.01) .. (1 - 0.01 + 0.01) of 909,000
+    assert dedup_check.min_value == round(909_000 * 0.98)
+    assert dedup_check.max_value == round(909_000 * 1.00)
 
 
 def test_other_tables_never_get_the_order_items_dedup_check_even_with_bronze_row_count():

@@ -35,8 +35,18 @@ HCMC_SKEW_TOLERANCE = 0.05
 
 VOLUME_TOLERANCE = 0.30
 
-ORDER_ITEMS_DEDUP_RATE = 0.02
+ORDER_ITEMS_DEDUP_RATE = 0.01
 ORDER_ITEMS_DEDUP_TOLERANCE = 0.01
+# 0.01, not the coursework spec's "2% duplicate rate" (01_data_generator.md,
+# generator_config.yaml's duplicate_rate_offline) -- generator.py injects
+# dup_mask at frac=duplicate_rate_offline/2 (see _generate_order_items),
+# so only ~1% of rows actually become removable duplicates; the other ~1%
+# is an artifact of the quality report measuring via duplicated(keep=False),
+# which flags both the original and the copy. This check has to match what
+# the generator actually produces, not the config's target label -- confirmed
+# against live Bronze data: 909,000 -> 899,999 true-unique rows on the
+# correct (order_id, product_id, unit_price, quantity) key, a real ~0.99%
+# removal. generator.py is intentionally left as-is (out of scope).
 
 
 def silver_expectation_suite(
@@ -55,7 +65,8 @@ def silver_expectation_suite(
         baseline_row_count: previous run's row count for this table, if known —
             enables the ±30% volume check.
         bronze_row_count: Bronze's row count for this run, `order_items` only —
-            enables the ~2% dedup-rate check (Problem C).
+            enables the dedup-rate check (Problem C), calibrated to the
+            generator's actual ~1% injected-duplicate rate.
     """
     suite = new_suite(f"silver_{table}")
 
