@@ -1,4 +1,5 @@
 # ruff: noqa: E402  -- sys.path manipulation must precede project imports
+from datetime import datetime
 from pathlib import Path
 import sys
 import pytest
@@ -6,7 +7,7 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from a_data_generator.generator import DataGenerator
+from a_data_generator.generator import DataGenerator, _resolve_sticky_schema_change_date
 from config.settings import settings
 
 # ---------------------------------------------------------------------------
@@ -200,6 +201,19 @@ def test_schema_evolution_new_orders_populated(generated_data, generator):
     cut    = generator.config["schema_change_date"]
     new    = orders[orders["order_timestamp"] >= cut]
     assert new["shipping_method"].notna().any(), "New orders: expected non-NULL shipping_method"
+
+
+def test_schema_evolution_new_orders_coupon_code_never_raw_null(generated_data, generator):
+    """New orders must use the 'NONE' sentinel for "no coupon used", never raw
+    NULL -- NULL is reserved exclusively for pre-cutoff legacy rows, which is
+    the invariant Silver's _fix_schema_evolution blanket fill depends on."""
+    orders = generated_data["orders"]
+    cut    = generator.config["schema_change_date"]
+    new    = orders[orders["order_timestamp"] >= cut]
+    assert new["coupon_code"].isna().sum() == 0, (
+        "New orders: coupon_code must never be raw NULL"
+    )
+    assert set(new["coupon_code"].unique()) <= {"SAVEUPTO20", "NONE"}
 
 
 def test_schema_evolution_both_partitions_exist(generated_data, generator):
@@ -540,3 +554,59 @@ def test_duplicate_events_slight_ts_shift(events_df):
     # All duplicates should have different created_ts
     all_same = (same_ts == 1).all()
     assert not all_same, "All duplicate events have identical created_ts — ts shift not applied"
+
+
+# ---------------------------------------------------------------------------
+# 7. _resolve_sticky_schema_change_date — Problem B persistence/self-healing
+# ---------------------------------------------------------------------------
+
+def test_sticky_date_persists_on_first_run(tmp_path):
+    """No persisted file yet -> computes fresh, writes it, returns it."""
+    persist_path = tmp_path / "schema_change_date.json"
+    computed  = datetime(2026, 3, 15)
+    sim_start = datetime(2026, 1, 1)
+    sim_end   = datetime(2026, 6, 30)
+
+    result = _resolve_sticky_schema_change_date(computed, sim_start, sim_end, persist_path)
+
+    assert result == computed
+    assert persist_path.exists()
+
+
+def test_sticky_date_reused_when_inside_window(tmp_path):
+    """A persisted date still inside [sim_start, sim_end] is reused as-is —
+    the whole point: repeated runs don't drift to a new calendar date."""
+    persist_path = tmp_path / "schema_change_date.json"
+    persisted = datetime(2026, 3, 15)
+    _resolve_sticky_schema_change_date(
+        persisted, datetime(2026, 1, 1), datetime(2026, 6, 30), persist_path
+    )
+    written_before = persist_path.read_text()
+
+    # A later run computes a different midpoint for its own (shifted) window —
+    # the persisted date must win over this new computation.
+    new_computed = datetime(2026, 4, 20)
+    result = _resolve_sticky_schema_change_date(
+        new_computed, datetime(2026, 1, 5), datetime(2026, 7, 4), persist_path
+    )
+
+    assert result == persisted
+    assert result != new_computed
+    assert persist_path.read_text() == written_before, "must not rewrite an already-valid date"
+
+
+def test_sticky_date_recomputed_when_persisted_date_outside_window(tmp_path):
+    """A persisted date the current window has entirely slid past is stale —
+    self-healing recomputes and re-persists rather than returning nonsense."""
+    persist_path = tmp_path / "schema_change_date.json"
+    stale = datetime(2025, 1, 1)
+    persist_path.write_text(f'{{"schema_change_date": "{stale.isoformat()}"}}')
+
+    new_computed = datetime(2026, 4, 1)
+    result = _resolve_sticky_schema_change_date(
+        new_computed, datetime(2026, 1, 1), datetime(2026, 6, 30), persist_path
+    )
+
+    assert result == new_computed
+    assert result != stale
+    assert new_computed.isoformat() in persist_path.read_text()

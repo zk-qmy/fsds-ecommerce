@@ -361,8 +361,12 @@ class DataGenerator:
             cfg, cfg["shipping_method_distribution"], alpha=2.0
         )
         shipping_methods = self._sample_from_distribution(rng, shipping_dist, size=n)
-        # coupon_code
-        coupon_code = np.where(rng.random(n) < 0.2, "SAVEUPTO20", None)
+        # coupon_code — "NONE" (not raw None/NULL) marks a real order that simply
+        # didn't use a coupon, so NULL is left to mean *only* "schema didn't have
+        # this column yet" (the old_mask override below). Silver's fill-any-NULL
+        # logic depends on this: without this sentinel, ~75-80% of modern
+        # no-coupon orders would be indistinguishable from pre-cutoff legacy rows.
+        coupon_code = np.where(rng.random(n) < 0.2, "SAVEUPTO20", "NONE")
 
         df = pd.DataFrame(
             {
@@ -874,8 +878,38 @@ class DataGenerator:
             return False
 
 
+def _resolve_sticky_schema_change_date(
+    computed: datetime, sim_start: datetime, sim_end: datetime, persist_path: Path
+) -> datetime:
+    """Reuse a previously-persisted schema_change_date if it still falls inside
+    [sim_start, sim_end]; otherwise persist `computed` and return it.
+
+    schema_change_date marks a one-time historical schema-migration event, not
+    a property of the data — it shouldn't drift to a new calendar date every
+    time the generator is re-run. But blind stickiness would reintroduce the
+    exact drift bug the float-fraction design already fixed once (see
+    01_data_generator.md §8.3): if the window ever slides entirely past a
+    persisted date, that date no longer makes sense and must be recomputed.
+    """
+    if persist_path.exists():
+        persisted = datetime.fromisoformat(
+            json.loads(persist_path.read_text())["schema_change_date"]
+        )
+        if sim_start <= persisted <= sim_end:
+            return persisted
+    persist_path.parent.mkdir(parents=True, exist_ok=True)
+    persist_path.write_text(json.dumps({"schema_change_date": computed.isoformat()}))
+    return computed
+
+
 def main():
     generator = DataGenerator(config_path=settings.DATA_GENERATOR_CONFIG_PATH)
+    generator.config["schema_change_date"] = _resolve_sticky_schema_change_date(
+        generator.config["schema_change_date"],
+        generator.config["sim_start"],
+        generator.config["sim_end"],
+        generator.output_path / "schema_change_date.json",
+    )
     customers, products, orders, order_items, payments = generator.generate()
 
     parser = argparse.ArgumentParser(

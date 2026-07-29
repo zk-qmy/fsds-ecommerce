@@ -8,6 +8,11 @@ schema_change_date: 0.5  # fraction of [sim_start, sim_end] -- NOT an absolute d
                           # _load_config anchors sim_start/sim_end to datetime.now(), so a literal
                           # calendar date drifts toward the window's edge as real time passes. A
                           # float is resolved relative to the window every run, so it never drifts.
+                          # The *resolved* date is then persisted by main() to
+                          # outputs/schema_change_date.json and reused across runs (self-healing
+                          # if the window ever drifts past it) -- it marks a one-time schema
+                          # migration event, not a property of the data, so it shouldn't move just
+                          # because more history was generated later.
 base_events_per_min: 100
 burst_multiplier: 30
 burst_windows: ["12:00-12:20", "20:00-20:20"]

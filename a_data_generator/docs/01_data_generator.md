@@ -89,13 +89,17 @@ Payment statuses — 85% paid, 10% failed, 5% refunded; ~10% failure rate is rea
 **Downstream handler:** Silver — no fill; Gold — partitioned by `shipping_city`.
 
 #### Problem B — Schema evolution (compulsory)
-`orders.coupon_code` and `orders.shipping_method` are NULL for all orders placed before `schema_change_date`. Configured as a **fraction of the 180-day window** (`0.5`), not a fixed calendar date — `sim_start`/`sim_end` are anchored to `datetime.now()` at generation time, so a literal date would drift out of alignment with the window as real time passes (this drift was the root cause of a CI failure — `test_schema_evolution_both_partitions_exist` — before the fix). The resolved calendar date therefore differs on every run; see §8.3 for one point-in-time example.
+`orders.coupon_code` and `orders.shipping_method` are NULL for all orders placed before `schema_change_date`. Configured as a **fraction of the 180-day window** (`0.5`), not a fixed calendar date — `sim_start`/`sim_end` are anchored to `datetime.now()` at generation time, so a literal date would drift out of alignment with the window as real time passes (this drift was the root cause of a CI failure — `test_schema_evolution_both_partitions_exist` — before the fix). The *resolved* calendar date is now sticky across runs (see the second Implementation note below) — see §8.3 for a point-in-time example.
 
 **Why:** Schema evolution is unavoidable in production. Old partitions must be handled without breaking new-schema queries.
 
-**Downstream handler:** Silver — NULL → `'LEGACY'` (coupon_code), NULL → `'UNKNOWN'` (shipping_method).
+**Downstream handler:** Silver — NULL → `'LEGACY'` (coupon_code), NULL → `'UNKNOWN'` (shipping_method). NULL means *only* "column didn't exist yet" — a post-cutoff order that simply used no coupon gets the `"NONE"` sentinel instead (see Implementation note below), so Silver's fill never has to guess which case it's looking at.
 
 **Implementation note (resolved):** `schema_change_date` used to be a fixed calendar date, which drifted out of alignment with the (real-time-anchored) window and eventually caused `test_schema_evolution_both_partitions_exist` to fail in CI. Config now sets it to the float `0.5`, which `_load_config` interprets as a relative fraction of `[sim_start, sim_end]` — this stays valid indefinitely, with no manual date maintenance required.
+
+**Implementation note 2 (resolved):** two further issues surfaced when investigating why Silver's `--schema-change-date` CLI parameter was unused —
+1. **`coupon_code` NULL was ambiguous.** ~20% of *all* orders get a real coupon; the rest previously got raw `None`, meaning "no coupon used" (a real, modern value) and "schema didn't have this column yet" (a legacy artifact) were indistinguishable. Fixed at the source: `_generate_orders` now emits an explicit `"NONE"` sentinel for the "no coupon" case, so `None`/NULL is reserved exclusively for pre-cutoff legacy rows. `shipping_method` never had this problem — it's always sampled to a real value post-cutoff, so its NULL already meant only "legacy."
+2. **The resolved `schema_change_date` shouldn't drift across regenerations.** It marks a one-time historical schema-migration event, not a property of the data, so re-running the generator to produce more history shouldn't silently move it to a new calendar date. `main()` now persists the first-resolved date to `a_data_generator/outputs/schema_change_date.json` and reuses it on subsequent runs — but only while it still falls inside that run's `[sim_start, sim_end]`; if the window has drifted entirely past it, it's recomputed and re-persisted (self-healing, avoiding a repeat of Implementation note 1's drift bug).
 
 #### Problem C — Duplicate rows in order_items (optional, chosen)
 2% of `order_items` rows are duplicated by natural key `(order_id, product_id, quantity, unit_price)`.
@@ -203,7 +207,7 @@ random_seed: 42
 # Offline problems
 skew_ratio_city: 0.85         # Problem A
 skew_ratio_category: 0.80
-schema_change_date: 0.5       # Problem B — fraction into current window (not a fixed date)
+schema_change_date: 0.5       # Problem B — fraction into current window; resolved date is sticky across runs (main())
 duplicate_rate_offline: 0.02  # Problem C
 
 # Streaming problems
@@ -312,10 +316,16 @@ Result: **PASS** — actual 85.1% is within ±2pp of target 85%.
 **Point-in-time example** — captured from a run on 2026-06-22, back when `schema_change_date`
 was still a fixed calendar date in config (since fixed as `0.5`, a fraction of the window — see
 the Implementation note above). The specific `schema_change_date` value and row counts below are
-illustrative for that one run, not literal constants — a fresh run today resolves the same
-`0.5` fraction against today's window instead, landing on a different calendar date but the same
-approximate ~15% split shown here (verified empirically when fixing
-`test_schema_evolution_both_partitions_exist` — see `tests/a_data_generator/test_config.yaml`).
+illustrative for that one run, not literal constants — with `main()`'s sticky persistence
+(Implementation note 2), a fresh run today reuses whatever date was already resolved on first
+generation instead of computing a new one each time, landing on the same approximate ~15% split
+shown here (verified empirically when fixing `test_schema_evolution_both_partitions_exist` — see
+`tests/a_data_generator/test_config.yaml`).
+
+This example also predates the `coupon_code` NONE-sentinel fix (Implementation note 2): the
+`79.9%` figure below was raw NULL at the time it was captured — a fresh run's "new orders" would
+show that same ~75-80% as the `"NONE"` string instead, with `coupon_code NULL` reading `0%` for
+new orders (NULL is now exclusive to the old partition).
 
 ```
 PROBLEM B -- Schema evolution (orders before schema_change_date):
@@ -324,7 +334,7 @@ PROBLEM B -- Schema evolution (orders before schema_change_date):
     coupon_code NULL    : 100%   <- expected 100%  [PASS]
     shipping_method NULL: 100%   <- expected 100%  [PASS]
   New orders (>=date): 305,937 rows
-    coupon_code NULL    : 79.9%  <- ~75-80% (no coupon used)
+    coupon_code NULL    : 79.9%  <- ~75-80% (no coupon used) -- pre-NONE-sentinel capture; see note above
     shipping_method NULL:  0%    <- expected 0%    [PASS]
 ```
 

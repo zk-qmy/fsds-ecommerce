@@ -10,6 +10,10 @@ schema_change_date: 0.5  # fraction of [sim_start, sim_end] -- NOT an absolute d
                           # eventually pushing old_ratio below the 10% floor
                           # (test_schema_evolution_both_partitions_exist). A float is resolved
                           # relative to the window every run, so it never drifts.
+                          # Note: tests construct DataGenerator directly (never through main()),
+                          # so the sticky-persistence step (_resolve_sticky_schema_change_date,
+                          # tested separately with tmp_path) never fires here -- every test run
+                          # resolves this fresh via _load_config, deterministically.
 base_events_per_min: 100
 burst_multiplier: 30
 burst_windows: ["12:00-12:20", "20:00-20:20"]
