@@ -30,6 +30,17 @@ from b_schema_pipelines.dq.common import new_suite
 
 VOLUME_TOLERANCE = 0.30
 
+# dim_date covers a rolling `days_history`-day window (_build_dim_date); fact_order/
+# fact_payment_attempt can carry a small number of rows whose date falls just
+# outside it — the same reason _create_foreign_keys() adds the real Postgres FK
+# constraints as NOT VALID rather than validated. This check needs the same
+# tolerance, or it's stricter than the design it's supposed to validate. Confirmed
+# live against real data: order_date_key ~2.3% outside dim_date, payment_date_key
+# ~0.2% — 0.95 covers both with room to spare, every other FK column stays strict
+# (mostly=1.0, GE's implicit default) since those don't have this known mismatch.
+DATE_FK_MOSTLY = 0.95
+DATE_REFERENCING_FK_COLUMNS = frozenset({"order_date_key", "payment_date_key"})
+
 
 def gold_expectation_suite(
     table: str,
@@ -54,7 +65,10 @@ def gold_expectation_suite(
         fk_checks: maps a fact's FK column to the full list of valid keys
             from the dimension it references, e.g.
             `{"customer_key": [1, 2, 3, ...]}` — the caller collects this
-            from the dimension table before validating.
+            from the dimension table before validating. `order_date_key`/
+            `payment_date_key` get a `mostly=` tolerance (DATE_FK_MOSTLY) for
+            dim_date's known rolling-window boundary mismatch; every other
+            FK column is checked strictly.
         baseline_row_count: previous run's row count, enabling the ±30%
             volume check.
     """
@@ -71,9 +85,10 @@ def gold_expectation_suite(
         suite.add_expectation(ExpectColumnValuesToBeUnique(column=unique_column))
 
     for fk_column, valid_keys in (fk_checks or {}).items():
-        suite.add_expectation(
-            ExpectColumnValuesToBeInSet(column=fk_column, value_set=valid_keys)
-        )
+        kwargs = {"column": fk_column, "value_set": valid_keys}
+        if fk_column in DATE_REFERENCING_FK_COLUMNS:
+            kwargs["mostly"] = DATE_FK_MOSTLY
+        suite.add_expectation(ExpectColumnValuesToBeInSet(**kwargs))
 
     if baseline_row_count is not None:
         lo = round(baseline_row_count * (1 - VOLUME_TOLERANCE))

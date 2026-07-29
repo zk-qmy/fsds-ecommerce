@@ -95,6 +95,28 @@ def test_fk_checks_omitted_by_default():
     assert "expect_column_values_to_be_in_set" not in _types(suite)
 
 
+def test_date_referencing_fk_columns_get_mostly_tolerance():
+    """order_date_key/payment_date_key get a mostly= tolerance for dim_date's
+    known rolling-window boundary mismatch (build_gold.py's _create_foreign_keys
+    tolerates the same thing at the DB level via NOT VALID constraints)."""
+    from b_schema_pipelines.dq.gold_suite import DATE_FK_MOSTLY
+
+    suite = gold_expectation_suite(
+        "fact_order",
+        FACT_ORDER_COLUMNS,
+        ["order_key"],
+        fk_checks={
+            "customer_key": [1, 2, 3],
+            "order_date_key": [20260101, 20260102],
+        },
+    )
+    mostly_by_column = {
+        e.column: e.mostly for e in suite.expectations if e.expectation_type == "expect_column_values_to_be_in_set"
+    }
+    assert mostly_by_column["order_date_key"] == DATE_FK_MOSTLY
+    assert mostly_by_column["customer_key"] == 1.0
+
+
 def test_volume_check_uses_thirty_percent_band_around_baseline():
     suite = gold_expectation_suite(
         "fact_order", FACT_ORDER_COLUMNS, ["order_key"], baseline_row_count=360_000

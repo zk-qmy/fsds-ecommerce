@@ -37,12 +37,10 @@ class SilverTransformer(PipelineBase):
         self,
         bronze_dir: str | None = None,
         silver_dir: str | None = None,
-        schema_change_date: str = "2026-03-24",
     ):
         super().__init__()
         self.bronze_dir = bronze_dir or self._resolve_s3_config("bronze")[0]
         self.silver_dir = silver_dir or self._resolve_s3_config("silver")[0]
-        self.schema_change_date = schema_change_date
         self.spark = self._build_spark()
         self.writer = DeltaWriter(spark=self.spark)
 
@@ -119,7 +117,15 @@ class SilverTransformer(PipelineBase):
     # private: fixes
 
     def _fix_schema_evolution(self, orders_df):
-        """Fix Problem B — fill NULLs in orders from before schema_change_date."""
+        """Fix Problem B — fill NULLs in orders from before schema_change_date.
+
+        No date parameter needed here: the generator emits an explicit "NONE"
+        sentinel for a real order that simply used no coupon, so NULL
+        coupon_code/shipping_method only ever occurs on pre-cutoff rows where
+        the columns didn't exist yet. A blanket fill-any-NULL is therefore
+        already correct — see a_data_generator/generator.py's `_generate_orders`
+        and 01_data_generator.md §Problem B for why that invariant holds.
+        """
         return orders_df.withColumn(
             "coupon_code",
             F.when(F.col("coupon_code").isNull(), F.lit("LEGACY")).otherwise(
@@ -136,11 +142,26 @@ class SilverTransformer(PipelineBase):
     def _fix_duplicates(self, order_items_df):
         """Fix Problem C — dedup order_items on natural key, keep one row per group.
 
+        Natural key is (order_id, product_id, unit_price, quantity) — matching
+        CLAUDE.md's documented Problem C key exactly. `quantity` is required,
+        not optional: without it, a customer legitimately ordering the same
+        product at the same price twice in one order (different quantity
+        each time — a real, distinct row, not an injected duplicate) collides
+        on the 3-column key and gets silently collapsed to one row. Found
+        live against the real generated dataset: 28 such false-positive
+        collisions, each one destroying a genuine order_items row.
+
         The generator injects exact-copy duplicates (no created_ts in order_items);
         ingest_ts is constant per batch so order_item_id is the stable tiebreaker.
-        Evidence: before count ~909,000 → after count ~890,000.
+        Evidence: before count ~909,000 → after count ~900,000 (the generator
+        duplicates ~1% of rows, not 2% — duplicate_rate_offline=0.02 is measured
+        via duplicated(keep=False), which counts both the original and the
+        copy; see dq/silver_suite.py's ORDER_ITEMS_DEDUP_RATE for the same
+        distinction on the validation side).
         """
-        window = Window.partitionBy("order_id", "product_id", "unit_price").orderBy(
+        window = Window.partitionBy(
+            "order_id", "product_id", "unit_price", "quantity"
+        ).orderBy(
             F.col("ingest_ts").asc(), F.col("order_item_id").asc()
         )
         return (
@@ -220,10 +241,9 @@ def main() -> None:
     parser.add_argument(
         "--mode", choices=["baseline", "optimized"], default="optimized"
     )
-    parser.add_argument("--schema-change-date", default="2026-03-24")
     args = parser.parse_args()
 
-    SilverTransformer(schema_change_date=args.schema_change_date).run(mode=args.mode)
+    SilverTransformer().run(mode=args.mode)
 
 
 if __name__ == "__main__":
