@@ -3,9 +3,11 @@
 ## Project overview
 
 Full-Stack Data Science (FSDS) coursework, ML track (Section 04.1).
-Domain: e-commerce purchase prediction.
-Goal: build an end-to-end ML system predicting `will_purchase_next_session`
-(binary classification) for 120 000 customers across a 180-day history window.
+Domain: e-commerce personalised homepage recommendation.
+Goal: build an end-to-end ML system that scores (customer, product) candidate
+pairs and returns each of 120 000 customers a ranked top-N product feed —
+`will_engage_with_product` (binary: click or purchase within the next
+session) — across a 180-day history window.
 
 This is a student project following the FSDS coursework structure.
 All design decisions must be explicit with trade-offs documented.
@@ -34,6 +36,8 @@ fsds-ecommerce/
 │   │       ├── feat_customer_90d.py
 │   │       ├── feat_stream_60m.py
 │   │       ├── feat_customer_unified.py
+│   │       ├── feat_product_90d.py           # product-side: popularity, recency, category avg price
+│   │       ├── feat_customer_product_interaction.py  # per (customer, product): view/cart/purchase counts
 │   │       └── push_stream_to_feast.py   # Flink output → Feast offline + online store
 │   ├── dags/                     # Airflow DAGs per pipeline group (DP1/DP2/DP3 + materialize)
 │   ├── dq/                       # Great Expectations suites
@@ -41,8 +45,8 @@ fsds-ecommerce/
 │       └── 02_schema_design.md
 ├── c_drift_labels/
 │   ├── generator_v2.py           # extends Section 01 with Scenario A drift
-│   ├── labels.py                 # ml_customer_label builder
-│   ├── training_table.py         # point-in-time join → ml_customer_purchase_training
+│   ├── labels.py                 # ml_homepage_label builder
+│   ├── training_table.py         # point-in-time join → ml_homepage_training
 │   └── docs/
 │       └── 03_drift_report.md
 ├── d_ml/
@@ -61,9 +65,9 @@ fsds-ecommerce/
 │   │   ├── materialize_dag.py         # Airflow DAG: incremental Feast offline→online materialize
 │   │   └── retrain_trigger_dag.py     # Airflow DAG: compute PSI → call Kubeflow API to retrain
 │   ├── api/
-│   │   ├── main.py               # FastAPI /score endpoint (async, Bearer auth, healthcheck)
-│   │   ├── schemas.py            # Pydantic request/response models
-│   │   ├── services.py           # async Feast feature fetch + model predict
+│   │   ├── main.py               # FastAPI /score endpoint — returns ranked top-N feed (async, Bearer auth, healthcheck)
+│   │   ├── schemas.py            # Pydantic request/response models (FeedItem list)
+│   │   ├── services.py           # async: candidate generation + Feast feature fetch + model predict
 │   │   ├── drift/
 │   │   │   ├── main.py           # FastAPI /detect-drift endpoint (async, healthcheck)
 │   │   │   ├── schemas.py        # DriftRequest / DriftResponse Pydantic models
@@ -199,15 +203,18 @@ Stream data:
 - `feat_customer_90d` — customer_id, event_timestamp, created_ts, f_customer_total_orders_90d, f_customer_avg_order_value_90d, f_customer_distinct_categories_90d, f_customer_payment_fail_rate_90d
 - `feat_stream_60m` — customer_id, event_timestamp, created_ts, f_stream_views_30m, f_stream_add_to_cart_30m, f_stream_cart_to_purchase_ratio_60m, f_stream_burst_activity_flag
 - `feat_customer_unified` — point-in-time join of above two
+- `feat_product_90d` — product_id, event_timestamp, created_ts, f_product_view_count_90d, f_product_purchase_count_90d, f_product_category_avg_price, f_product_recency_days
+- `feat_customer_product_interaction_90d` — customer_id, product_id, event_timestamp, created_ts, f_cp_view_count_90d, f_cp_cart_count_90d, f_cp_purchase_count_90d, f_cp_days_since_last_interaction
+- `feat_homepage_unified` — point-in-time join of feat_customer_unified + feat_product_90d + feat_customer_product_interaction_90d, keyed by (customer_id, product_id)
 
 **ML tables:**
-- `ml_customer_label` — customer_id, event_timestamp, created_ts, label (0/1)
-- `ml_customer_purchase_training` — label + all feature columns, used for train/val/test split
+- `ml_homepage_label` — customer_id, product_id, event_timestamp, created_ts, label (0/1 — clicked or purchased product_id within next session)
+- `ml_homepage_training` — label + all feature columns, keyed by (customer_id, product_id), used for train/val/test split
 
 **Monitoring tables:**
 - `agg_feature_health_daily` — monitoring_date, feature_name, mean_value, psi_vs_baseline, alert_flag
 - `feature_drift_alerts` — alert_date, feature_name, psi_value, action
-- `ml_customer_scores` — customer_id, score, model_version, score_ts
+- `ml_homepage_feed` — customer_id, product_id, rank, score, model_version, score_ts
 
 ---
 
@@ -218,8 +225,8 @@ These are deliberate. Do not treat them as bugs when you see them in the data.
 | Problem | Table | Detail | Downstream handler |
 |---|---|---|---|
 | A — City skew | orders | 85% shipping_city = 'Ho Chi Minh City' | Silver: no special handling; Gold: partitioned by city |
-| B — Schema evolution | orders | coupon_code + shipping_method = NULL before schema_change_date | Silver: fill NULL → 'LEGACY' / 'UNKNOWN' |
-| C — Duplicate rows | order_items | 2% rows duplicated by (order_id, product_id, quantity, unit_price) | Silver: dedup, keep earliest created_ts |
+| B — Schema evolution | orders | coupon_code + shipping_method = NULL before schema_change_date (coupon_code after that date is a real code or the "NONE" sentinel, never raw NULL) | Silver: fill NULL → 'LEGACY' / 'UNKNOWN' |
+| C — Duplicate rows | order_items | 2% rows duplicated by (order_id, product_id, quantity, unit_price) | Silver: dedup, keep earliest ingest_ts (tiebreak order_item_id) |
 | D — Burst traffic | events stream | 30× rate at 12:00–12:20 and 20:00–20:20 | Flink: watermarks + backpressure config |
 | E — Late arrivals | events stream | 12% events: created_ts delayed 5–45 min after event_timestamp | Flink: AllowedLateness + WatermarkStrategy |
 | F — Duplicate events | events stream | 1.5% duplicate event_ids with slight ts shift | Stream dedup: key on event_id + event_timestamp |
@@ -229,34 +236,36 @@ These are deliberate. Do not treat them as bugs when you see them in the data.
 ## ML system design
 
 ### Prediction task
-- Entity: customer_id
-- Label: `will_purchase_next_session` — 1 if customer places any order in (event_timestamp, event_timestamp + 24h]
-- Features: 8 columns from feat_customer_unified (4 offline + 4 streaming)
-- Model: LogisticRegression(class_weight='balanced') as baseline
+- Entity: (customer_id, product_id) candidate pair
+- Label: `will_engage_with_product` — 1 if customer clicks or purchases product_id in (event_timestamp, event_timestamp + 24h]
+- Candidate generation: per customer, restrict to products in their historical categories (from `f_customer_distinct_categories_90d`) union top-K popular products overall, capped at ~50 candidates before scoring — scoring every product for every customer does not scale and isn't needed
+- Features: 8 columns from feat_customer_unified (4 offline + 4 streaming) + 4 columns from feat_product_90d + 4 columns from feat_customer_product_interaction_90d, joined via feat_homepage_unified
+- Model: LogisticRegression(class_weight='balanced') as a pointwise scorer — ranks candidates per customer by predicted probability, baseline (not a learned ranking loss)
 
 ### Split strategy
 Time-based split only — never random split (prevents future data leakage):
 - train: first 70% of timeline
 - val: next 15%
 - test: last 15%
+- split boundaries apply at the (customer_id, product_id, event_timestamp) grain — a candidate pair's features must never see interaction history from after its event_timestamp
 
 ### 5 HLD decisions
 1. **Security** — training data readable only by svc-training service account; inference API uses Bearer token auth; all secrets managed in HashiCorp Vault and injected into pods via Vault Agent Injector — never stored in K8s Secrets directly, never hardcoded, never in Helm values files; service-to-service calls secured by Istio mTLS
 2. **Resilience** — 3 retries + exponential backoff on all Airflow jobs; scoring_job is partition-idempotent; `helm upgrade --atomic` auto-rolls back on failed health check within timeout
-3. **Serving pattern** — batch precompute (weekly training + PSI-triggered retrain); scores written to ml_customer_scores table; trade-off: 24h staleness vs operational simplicity
+3. **Serving pattern** — batch precompute (weekly training + PSI-triggered retrain); candidate generation + scoring produces a top-N feed per customer, written to ml_homepage_feed table; trade-off: 24h staleness vs operational simplicity — acceptable since a homepage feed doesn't need session-live freshness the way fraud/payment risk would
 4. **Storage** — Bronze/Silver: Delta Lake on MinIO/GCS; Gold/Features: PostgreSQL (Cloud SQL in prod); model artifacts: MLflow registry; training data versions: DVC (incremental, MinIO remote); logs: Loki (90-day retention, structured JSON)
 5. **Routing** — FastAPI /score + drift-api /detect-drift both behind NGINX Ingress Controller on GKE; KEDA scales each API 2–8 pods by HTTP request rate (Prometheus metric); rate limit 100 req/s via Ingress annotation
 
 ### 5 LLD classes
-- `TrainingDataService` — reads ml_customer_purchase_training, validates schema, deduplicates by created_ts
-- `SplitService` — time-based train/val/test split, enforces no leakage
-- `ModelService` — train, evaluate (F1/precision/recall/PR-AUC), save to MLflow, load from registry
-- `ScoringService` — score_batch, score_online, score_stream, write_scores to ml_customer_scores
+- `TrainingDataService` — reads ml_homepage_training, validates schema, deduplicates by created_ts
+- `SplitService` — time-based train/val/test split at the (customer_id, product_id, event_timestamp) grain, enforces no leakage
+- `ModelService` — train, evaluate (pointwise F1/precision/recall as sanity checks, NDCG@10/Recall@10 as the ranking metric), save to MLflow, load from registry
+- `ScoringService` — generate_candidates, score_batch, rank top-N, write_scores to ml_homepage_feed
 - `MonitoringService` — publish_model_metrics, publish_drift_metrics, trigger_alerts, write to agg_feature_health_daily
 
 ### Acceptance threshold
-- F1 >= 0.60 on test set to register model
-- Candidate must beat production F1 by >= 0.02 to be promoted
+- NDCG@10 >= 0.35 on test set to register model
+- Candidate must beat production NDCG@10 by >= 0.02 to be promoted
 
 ---
 
@@ -399,6 +408,7 @@ Step 3b — rollback (--atomic already triggered):
 dp1_bronze_dag:   ingest raw parquet/json → Delta Lake (append, add ingest metadata)
 dp2_gold_dag:     bronze → silver (dedup/fill) → gold (dim/fact/obt) → gold_ecommerce schema
 dp3_feature_dag:  gold + Flink output → feat_customer_90d + feat_stream_60m → feat_customer_unified
+                  gold → feat_product_90d + feat_customer_product_interaction_90d → feat_homepage_unified
 ```
 
 Each pipeline job must log: run_id, pipeline_name, start_ts, end_ts, status, input_rows, output_rows, error_summary.
@@ -436,7 +446,7 @@ training_pipeline.py  (Kubeflow Pipelines v2):
 
 Retrain triggers:
 - PSI > 0.15 sustained 3+ consecutive days on any feature
-- Production F1 drops below 0.60 on rolling validation window
+- Production NDCG@10 drops below 0.35 on rolling validation window
 
 ### Flink → Feast push jobs
 
@@ -695,7 +705,7 @@ CD (merge to main):
 | Label drift | Rolling conversion rate | SQL → Grafana | >20% drop from baseline |
 | Inference latency | p95 request time | Prometheus | >200ms |
 | Pipeline health | Job success/failure count | Airflow → Prometheus | Any failure |
-| Model quality | F1 on rolling val window | MLflow → Grafana | F1 < 0.60 |
+| Model quality | NDCG@10 on rolling val window | MLflow → Grafana | NDCG@10 < 0.35 |
 
 Observability stack: OpenTelemetry SDK instruments FastAPI and drift-api → Jaeger (traces), Prometheus (metrics), Loki (logs, structured JSON, 90-day retention).
 
@@ -770,10 +780,10 @@ helm upgrade --install inference-api infra/helm/inference-api \
   --create-namespace --atomic --timeout 5m \
   -f infra/helm/inference-api/values-dev.yaml
 
-# Test
+# Test — returns a ranked top-N product feed for the customer
 curl https://api-dev.fsds-ecommerce.com/score \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"customer_id": "C0000001"}'
+  -d '{"customer_id": "C0000001", "top_n": 10}'
 ```
 
 ---
@@ -818,7 +828,7 @@ Before submitting each section, verify:
 - [ ] DBeaver ER diagram + SCD2 columns + feat_ columns (Section 02)
 - [ ] PSI escalation evidence after drift_start_date (Section 03)
 - [ ] Kubeflow Pipelines UI green run screenshot with distributed training (Section 04)
-- [ ] MLflow run screenshot with F1 metric + model registry (Section 04)
+- [ ] MLflow run screenshot with NDCG@10 metric + model registry (Section 04)
 - [ ] Feast materialize pipeline screenshot + TTL doc (Section 04)
 - [ ] pytest coverage > 90% screenshot (Section 04)
 - [ ] mutmut mutation score > 80% screenshot (Section 04)
@@ -846,8 +856,12 @@ Key config fields and what they control:
 schema_change_date: 0.5            # fraction of [sim_start, sim_end], NOT an absolute date —
                                     # the window itself slides with real time (sim_start/sim_end
                                     # are anchored to datetime.now()), so a fixed calendar date
-                                    # would drift out of alignment; NULL coupon/shipping before
-                                    # the resolved point
+                                    # would drift out of alignment. The resolved date is persisted
+                                    # by main() and reused across runs (self-healing if the window
+                                    # drifts past it) — it marks a one-time schema-migration event,
+                                    # not a property of the data. NULL shipping_method/coupon_code
+                                    # before that point; coupon_code after it is either a real code
+                                    # or the "NONE" sentinel — never raw NULL post-cutoff
 avg_orders_per_customer: 3.0       # Poisson λ for order count per customer
 avg_items_per_order: 2.5           # Poisson λ for items per order
 marketing_opt_in_rate: 0.70        # used as rng.random(n) < cfg["marketing_opt_in_rate"]

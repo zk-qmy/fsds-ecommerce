@@ -7,7 +7,7 @@
 **Objective:**
 Business-ready Gold model for analytics and BI, plus implemented data pipelines with lineage visibility in DataHub. Feature tables feed the ML training and real-time scoring system (Section 04).
 
-**Approach:** Star schema (Fact + Dimension) for the Gold layer, plus a denormalised OBT for BI tooling, plus two feature tables pushed to Feast.
+**Approach:** Star schema (Fact + Dimension) for the Gold layer, plus a denormalised OBT for BI tooling, plus the feature tables (customer, streaming, product, customer×product interaction, and their point-in-time joins — §6/§9) pushed to Feast.
 
 **Coursework requirement:** Design and implement data pipelines end-to-end, and capture lineage for key datasets using DataHub.
 
@@ -73,7 +73,7 @@ Business-ready Gold model for analytics and BI, plus implemented data pipelines 
 |---|---|---|---|
 | A — City skew | orders | 85% shipping_city = 'Ho Chi Minh City' | AQE `skewJoin.enabled=true` in Silver; Gold partitioned by city |
 | B — Schema evolution | orders | coupon_code + shipping_method NULL before `schema_change_date` (config: fraction `0.5` of the 180-day window, not a fixed date) | Silver: fill NULL → 'LEGACY' / 'UNKNOWN'; write with `mergeSchema=true` |
-| C — Duplicate rows | order_items | 2% duplicated by (order_id, product_id, unit_price) | Silver: Window rank on `created_ts asc`, keep rank=1 |
+| C — Duplicate rows | order_items | ~2% injected (measured via `duplicated(keep=False)`, which flags both copies) — actual rows removed on dedup ~1% by (order_id, product_id, quantity, unit_price) | Silver: Window rank on `ingest_ts asc, order_item_id asc`, keep rank=1 |
 | D — Burst traffic | events | 30x rate at 12:00–12:20 and 20:00–20:20 | Flink: watermarks + backpressure config |
 | E — Late arrivals | events | 12% events delayed 5–45 min | Flink: `WatermarkStrategy` + `AllowedLateness` |
 | F — Duplicate events | events | 1.5% duplicate event_ids | Flink: keyed `ValueState` dedup on `event_id` |
@@ -184,8 +184,8 @@ New columns are handled via Delta Lake `mergeSchema=True` on Silver writes. Silv
 
 ### Deduplication Strategy
 
-* **Detection:** Duplicates detected in Silver using `Window.partitionBy("order_id", "product_id", "unit_price").orderBy("created_ts")` and a `row_number()` rank.
-* **Removal:** Only rows with `rank = 1` (earliest `created_ts`) are kept. Applied in `SilverTransformer._fix_duplicates()` before Gold load.
+* **Detection:** Duplicates detected in Silver using `Window.partitionBy("order_id", "product_id", "unit_price", "quantity").orderBy("ingest_ts asc", "order_item_id asc")` and a `row_number()` rank. `quantity` is part of the key — a customer legitimately ordering the same product at the same price twice in one order (different quantity each time) is a real, distinct row, not an injected duplicate. `order_items` has no `created_ts` of its own and `ingest_ts` is constant per batch, so `order_item_id` is the real tiebreaker.
+* **Removal:** Only rows with `rank = 1` are kept. Applied in `SilverTransformer._fix_duplicates()` before Gold load.
 
 ---
 
@@ -271,7 +271,7 @@ Implemented using Great Expectations suites in `b_schema_pipelines/dq/`. A faile
 | Volume check | Output rows within ±30% of previous run baseline | Silver, Gold |
 | Skew check | `shipping_city` HCMC rate within ±5pp of 85% | Silver (Problem A) |
 | NULL fill check | Zero NULLs in `coupon_code` and `shipping_method` after Silver | Silver (Problem B) |
-| Dedup check | order_items row count reduced by ~2% vs Bronze | Silver (Problem C) |
+| Dedup check | order_items row count reduced by ~1% vs Bronze | Silver (Problem C) |
 
 ---
 
@@ -336,7 +336,7 @@ If the same (`customer_id`, `event_timestamp`) pair is written twice (e.g. pipel
 
 ## Feature Table: feat_customer_unified
 
-* **Purpose:** Single feature view combining offline (90-day) and streaming (60-minute) signal per customer, for Section 03's `training_table.py` to join against `ml_customer_label` and for real-time scoring.
+* **Purpose:** Single feature view combining offline (90-day) and streaming (60-minute) signal per customer — the customer-side input to `feat_homepage_unified` (§9 below), which Section 03's `training_table.py` joins against `ml_homepage_label` to build the homepage-recommendation model's training rows.
 * **Grain:** One row per (`customer_id`, `event_timestamp`) — **follows `feat_stream_60m`'s grain**, not `feat_customer_90d`'s. The two source tables sit on different time grains (`feat_customer_90d` is one row per customer per *day*, midnight-stamped; `feat_stream_60m` is one row per customer per 60-minute *window*, stamped at the window start) — an equi-join on `event_timestamp` between them would only match when a stream window happened to start at exactly midnight on a snapshot day, i.e. almost never. This table's grain deliberately follows the finer-grained side.
 * **Primary Key:** (`customer_id`, `event_timestamp`)
 * **Join type:** As-of join, not an equi-join. For each `feat_stream_60m` row, attach the *latest* `feat_customer_90d` row at or before that row's `event_timestamp`, per customer — implemented as a ranked window (`Window.partitionBy(customer_id, event_timestamp).orderBy(offline_event_timestamp.desc())`, keep rank 1) over a left join with the range condition `offline.event_timestamp <= stream.event_timestamp`. This is the same `f.event_timestamp <= l.event_timestamp` point-in-time rule this doc already states for features-to-labels joins, applied here between two feature tables instead.
@@ -369,7 +369,7 @@ If the same (`customer_id`, `event_timestamp`) pair is written twice (e.g. pipel
 * **Transformations:**
   * Problem A: AQE skew join enabled (`spark.sql.adaptive.skewJoin.enabled=true`)
   * Problem B: NULL fill — `coupon_code → LEGACY`, `shipping_method → UNKNOWN`; write with `mergeSchema=True`
-  * Problem C: Dedup `order_items` on `(order_id, product_id, unit_price)`, keep earliest `created_ts`
+  * Problem C: Dedup `order_items` on `(order_id, product_id, unit_price, quantity)`, keep earliest `ingest_ts` (tiebreak on `order_item_id`)
   * Broadcast hint: `dim_product` (45k rows) broadcast to eliminate SortMergeJoin shuffle
 * **Schedule:** 01:00 daily (stage inside `dp2_gold_dag`)
 
@@ -538,10 +538,195 @@ Z-ordering `order_timestamp` + `customer_id` on Silver orders reduces data scann
 | Metric | Before | After |
 |---|---|---|
 | Silver orders job — max task duration (city skew) | TBD | Target: <3x variance across tasks |
-| Silver order_items count | 909,000 rows | ~890,000 rows (−2% dedup) |
+| Silver order_items count | 909,000 rows | ~900,000 rows (−1% dedup) |
 | Gold orders join — join strategy | SortMergeJoin (shuffle) | BroadcastHashJoin (no shuffle) |
 | Delta Lake file count (Silver orders) | TBD (pre-compaction) | Target: >50% file count reduction |
 | PostgreSQL scan (fact_order by customer) | Seq scan | Index scan (verified via EXPLAIN ANALYZE) |
+
+## 9. DP3 Addendum — Homepage Candidate Features
+
+### Context
+
+CLAUDE.md's ML system design was pivoted from `will_purchase_next_session`
+(customer-only propensity) to a personalised-homepage recommender scoring
+`(customer_id, product_id)` candidate pairs. That requires two feature
+tables beyond `feat_customer_90d`/`feat_stream_60m`/`feat_customer_unified`
+above, plus a new unified join. Nothing in Bronze/Silver/Gold changes —
+`dim_product`, `fact_order_item`, and `events` already carry everything
+needed (`product_id` is already present on both `order_items` and `events`
+at the required grain).
+
+### Feature Table: feat_product_90d (offline)
+
+* **Purpose:** Rolling 90-day behavioural summary per *product* — the
+  product-side counterpart to `feat_customer_90d`.
+* **Grain:** One row per (`product_id`, `event_timestamp` / snapshot date).
+* **Primary Key:** (`product_id`, `event_timestamp`)
+* **Feast entity:** `product_id`
+* **TTL:** 90 days
+* **Reader shape:** the first feature job to need **both** sources at once —
+  Gold via JDBC (`dim_product`, `fact_order_item`, `fact_order`, `dim_date`)
+  for purchase count and category avg price, plus the events NDJSON source
+  (same reader `feat_stream_60m` uses, windowed 90 days instead of 60
+  minutes) for view count and recency.
+
+| Feature | Description | Window |
+|---|---|---|
+| `f_product_view_count_90d` | COUNT(`view` events) per product | Rolling 90 days |
+| `f_product_purchase_count_90d` | COUNT(`fact_order_item` rows) per product | Rolling 90 days |
+| `f_product_category_avg_price` | AVG(`base_price`) of products in the same category | Not time-windowed — static per snapshot unless the catalog changes |
+| `f_product_recency_days` | Days since the product's most recent interaction (any event type) | Rolling 90 days |
+
+**Cold start — new product:** a product with zero interactions in the
+window has no row to compute `f_product_recency_days` from. Rather than
+leaving it NULL, it's coalesced to `WINDOW_DAYS` (90) — a bounded sentinel,
+not an unbounded gap — the same "counts default to 0, keep the feature
+numeric" rule `feat_customer_90d` already applies. Combined with
+`f_product_purchase_count_90d` also defaulting to 0, a new product ranks
+last on the popularity signal `feat_homepage_unified`'s candidate generation
+uses (below) — it will not surface as a recommendation until it accumulates
+real purchases. This is an emergent property of the ranking, not a
+special-cased branch.
+
+---
+
+### Feature Table: feat_customer_product_interaction_90d (offline)
+
+* **Purpose:** Rolling 90-day interaction history per (customer, product)
+  pair — view/cart/purchase signal that a plain customer-level or
+  product-level feature can't capture.
+* **Grain:** One row per (`customer_id`, `product_id`, `event_timestamp`) —
+  **sparse**: only pairs with ≥1 real view/cart/purchase event in the
+  window get a row. This is a deliberate choice, not an oversight — a dense
+  cross-join of every customer against every product would be enormous and
+  mostly meaningless; candidate generation (below) is where the "which
+  products could this customer plausibly see" decision belongs.
+* **Primary Key:** (`customer_id`, `product_id`, `event_timestamp`)
+* **Feast entity:** composite (`customer_id`, `product_id`)
+* **TTL:** 90 days
+* **Reader shape:** same hybrid pattern as `feat_product_90d` — events
+  NDJSON for view/cart counts, Gold JDBC for purchase counts — unioned by
+  pair, not cross-joined.
+
+| Feature | Description | Window |
+|---|---|---|
+| `f_cp_view_count_90d` | COUNT(`view` events) for this pair | Rolling 90 days |
+| `f_cp_cart_count_90d` | COUNT(`add_to_cart` events) for this pair | Rolling 90 days |
+| `f_cp_purchase_count_90d` | COUNT(`fact_order_item` rows) for this pair | Rolling 90 days |
+| `f_cp_days_since_last_interaction` | Days since the latest view/cart/purchase for this pair | Rolling 90 days |
+
+Because a row only exists when ≥1 signal is present, `f_cp_days_since_last_interaction`
+is always a real, bounded number here — no NULL/sentinel handling needed
+(unlike `feat_product_90d`'s product-level recency, which must handle the
+zero-interaction case explicitly).
+
+---
+
+### Feature Table: feat_homepage_unified
+
+* **Purpose:** The training/serving-ready feature table for the
+  homepage-recommendation model — one row per candidate `(customer_id,
+  product_id)` pair, joined against customer-side and product-side features.
+* **Grain:** One row per (`customer_id`, `product_id`, `event_timestamp`) —
+  a **daily snapshot**, same grain as `feat_product_90d` and
+  `feat_customer_product_interaction_90d`, not `feat_customer_unified`'s
+  finer intra-day stream grain. Candidate generation is itself derived from
+  those two daily snapshot tables, so redoing it at 60-minute granularity
+  would recompute the same candidate set dozens of times a day for no
+  benefit — `feat_customer_unified`'s finer grain is collapsed down to "the
+  latest row at or before this snapshot, per customer" (the same as-of idea
+  it already applies to `feat_customer_90d`, one level up the stack).
+* **Primary Key:** (`customer_id`, `product_id`, `event_timestamp`)
+
+**This table does not simply sit on top of `feat_customer_product_interaction_90d`.**
+Building it directly on the sparse interaction table would mean it only
+ever contains rows for pairs the customer *already* touched — no negative
+examples for training, and no way to add them later without re-deriving the
+same joins. Instead, `feat_homepage_unified` **generates its own candidate
+set first**, then attaches features to it — reusing
+`feat_customer_product_interaction_90d` and `feat_product_90d` as already
+computed by the two sibling jobs for the same `snapshot_date`, rather than
+re-querying Gold with a second window join.
+
+#### Candidate Generation Policy
+
+Per customer (every customer with a row in `feat_customer_unified` at or
+before `snapshot_date`):
+
+1. **Historical-category candidates** — products in categories the customer
+   has interacted with in the window, derived from
+   `feat_customer_product_interaction_90d`'s pairs (already window-scoped
+   by that job) joined to `dim_product` for category, then expanded back to
+   every product in those categories.
+2. **Popular-fallback candidates** — top products by
+   `feat_product_90d.f_product_purchase_count_90d` (reused, not
+   recomputed), filling any remaining slots.
+3. **Cap at `MAX_CANDIDATES = 50` per customer** — historical-category
+   candidates first (truncated by popularity if that set alone exceeds 50),
+   then popular-fallback fills the rest.
+
+This is the **same policy** documented for `ScoringService.generate_candidates`
+at serving time (`04_ml_design.md`, once written). Using one policy in both
+places is deliberate: it avoids train/serve skew — the model is trained on
+the same *kind* of candidate set it will be scored against in production,
+not on an easier or differently-shaped distribution.
+
+#### Cold-Start Strategy
+
+* **New customer** (no interaction history yet → empty historical-category
+  set): candidate generation naturally degrades to 100% popular-fallback
+  candidates — no special-case branch, it falls out of "fill remaining
+  slots with popular-fallback" when the historical-category set is empty.
+  This *is* "recommend the most popular products from the last 90 days
+  until sufficient interaction history is collected."
+* **New product** (no interactions yet): see `feat_product_90d`'s cold-start
+  note above — zero-sentinel features, excluded from the popular-fallback
+  slice until it accumulates real purchases.
+
+#### Feature Attachment
+
+1. LEFT join the candidate set against `feat_customer_product_interaction_90d`
+   on `(customer_id, product_id)` (direct join — both are for the same
+   `snapshot_date`). Most candidates (the popular-fallback ones) won't have
+   a row there — that's the expected, normal case, not an edge case — so
+   all 4 `f_cp_*` columns coalesce to `0`/`WINDOW_DAYS` when absent, the
+   same sentinel rule `feat_product_90d` uses.
+2. Direct join the (already-collapsed) latest `feat_customer_unified` row
+   per customer.
+3. Direct join `feat_product_90d` per product (also already filtered to
+   this exact `snapshot_date`).
+
+**Output:** `customer_id, product_id, event_timestamp, created_ts` + 8
+columns from `feat_customer_unified` + 4 from `feat_product_90d` + 4 from
+`feat_customer_product_interaction_90d` = 16 feature columns total. This
+table is directly consumable by Section 03's `training_table.py` for both
+positive and negative label rows — it already has a row for every candidate
+a customer would plausibly be shown, not just the ones they clicked.
+
+---
+
+### Validation Fix
+
+`validate_feature_tables()` (`dq/validation_runner.py`) previously hardcoded
+a single `pk_columns=["customer_id", "event_timestamp"]` for every table in
+`FEATURE_TABLES` — correct while every feature table shared that PK shape,
+but wrong the moment a product-keyed (`feat_product_90d`) or pair-keyed
+(`feat_customer_product_interaction_90d`, `feat_homepage_unified`) table is
+added. Fixed by adding a `FEATURE_TABLE_PK_COLUMNS` per-table lookup,
+mirroring the pattern `GOLD_TABLE_KEYS` already uses for Gold.
+
+### Refresh Target (updated)
+
+| Feature table | Feast store | Refresh |
+|---|---|---|
+| `feat_product_90d` | Offline (PostgreSQL) | Daily at 02:30 via `dp3_feature_dag` |
+| `feat_customer_product_interaction_90d` | Offline (PostgreSQL) | Daily at 02:30 via `dp3_feature_dag` |
+| `feat_homepage_unified` | Offline (PostgreSQL) | After all of the above, same `dp3_feature_dag` run |
+
+DAG wiring is done — `feat_product_90d`/`feat_customer_product_interaction`/`feat_homepage_unified`
+are tasks in `dp3_feature_dag.py` (confirmed live 2026-07-29; `dags/plan.md` §8).
+
+---
 
 ## Summary
 
@@ -557,3 +742,4 @@ Section 02 implements a full Bronze → Silver → Gold → Feature pipeline for
 | Feature store | Feast (PostgreSQL offline, Redis online) | Standard MLOps pattern + Section 04 integration vs custom solution |
 | Orchestration | Airflow 2.8 | Production-grade scheduling, retry, alerting vs simple cron |
 | Lineage | DataHub | Full pipeline graph visibility vs no lineage tracking |
+| Homepage candidate generation | Sparse interaction table + generated candidate set (shared policy with serving) | Train/serve parity vs a policy invented twice, at the cost of a heavier `feat_homepage_unified` job |

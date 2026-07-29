@@ -44,19 +44,61 @@ RUN pip install --no-cache-dir \
     apache-airflow-providers-postgres \
     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.12.txt"
 
+# The base image ships ~26 provider packages this project never uses (amazon,
+# google, microsoft-azure, snowflake, elasticsearch, celery, cncf-kubernetes,
+# docker, slack, mysql, odbc, sftp/ssh, sendgrid, imap/ftp/smtp, grpc,
+# hashicorp, openlineage, redis, sqlite) -- each one pulls its own SDK
+# (boto3, google-cloud-storage, azure-storage-blob, snowflake-connector,
+# kubernetes client, paramiko, ...), all of which get enumerated/imported at
+# webserver startup regardless of whether a DAG ever uses them. Measured live:
+# this is what the "SyntaxWarning" spam from azure/google modules in the
+# webserver logs was, and a real contributor to slow/flaky startup under
+# resource pressure (docker-compose.yml's WORKERS comment). Only postgres
+# (fsds_postgres Connection) and http (fsds_minio Connection, --conn-type
+# http) are actually used; fab/common-sql/common-compat/common-io are kept
+# as likely dependencies of postgres/the webserver's own auth manager, not
+# verified as safe to remove. Re-add hashicorp/redis if Section 04 actually
+# starts using VaultHook/RedisHook -- not yet the case.
+RUN pip uninstall -y \
+    apache-airflow-providers-amazon \
+    apache-airflow-providers-celery \
+    apache-airflow-providers-cncf-kubernetes \
+    apache-airflow-providers-docker \
+    apache-airflow-providers-elasticsearch \
+    apache-airflow-providers-google \
+    apache-airflow-providers-grpc \
+    apache-airflow-providers-hashicorp \
+    apache-airflow-providers-imap \
+    apache-airflow-providers-microsoft-azure \
+    apache-airflow-providers-mysql \
+    apache-airflow-providers-odbc \
+    apache-airflow-providers-openlineage \
+    apache-airflow-providers-redis \
+    apache-airflow-providers-sendgrid \
+    apache-airflow-providers-sftp \
+    apache-airflow-providers-slack \
+    apache-airflow-providers-smtp \
+    apache-airflow-providers-snowflake \
+    apache-airflow-providers-sqlite \
+    apache-airflow-providers-ssh \
+    apache-airflow-providers-ftp
+
 # uv -- a CLI tool only, to bootstrap the project's OWN venv at container start.
 # Never used to manage Airflow's own dependencies.
 RUN pip install --no-cache-dir uv
 
-# docker-compose.yml mounts an anonymous volume at /opt/venvs (NOT at
-# /opt/project/.venv itself -- confirmed live that mounting exactly at the
-# venv's own path means `uv sync` can never fully rebuild a stale venv: it can
-# delete files INSIDE a mounted directory but can't rmdir the mountpoint
-# itself ("Device or resource busy"), which is exactly what uv does when an
-# existing venv's Python interpreter no longer resolves, e.g. after an image
-# rebuild). UV_PROJECT_ENVIRONMENT (docker-compose.yml) points the project's
-# own venv at /opt/venvs/project instead -- a plain, freely-recreatable
-# subdirectory of that mount, never the mountpoint itself.
+# docker-compose.yml mounts a named volume (airflow_venvs) at /opt/venvs
+# (NOT at /opt/project/.venv itself -- confirmed live that mounting exactly
+# at the venv's own path means `uv sync` can never fully rebuild a stale
+# venv: it can delete files INSIDE a mounted directory but can't rmdir the
+# mountpoint itself ("Device or resource busy"), which is exactly what uv
+# does when an existing venv's Python interpreter no longer resolves, e.g.
+# after an image rebuild). UV_PROJECT_ENVIRONMENT (docker-compose.yml) points
+# the project's own venv at /opt/venvs/project instead -- a plain,
+# freely-recreatable subdirectory of that mount, never the mountpoint itself.
+# Named rather than anonymous specifically so it survives
+# `--force-recreate`, not just a plain restart -- see docker-compose.yml's
+# volume comment for the measured cost of getting this wrong.
 #
 # Docker initializes an anonymous volume's content/ownership from whatever
 # already exists at that path in the image -- without this, it defaults to

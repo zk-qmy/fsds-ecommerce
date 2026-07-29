@@ -128,7 +128,7 @@ that division of labor is what keeps them unit-testable without a running cluste
 | `HCMC_SKEW_TARGET` | `0.85` | CLAUDE.md's documented Problem A injection rate |
 | `HCMC_SKEW_TOLERANCE` | `0.05` | ±5pp band, per `docs/02_schema_piplines.md` §5 |
 | `VOLUME_TOLERANCE` | `0.30` | ±30% of baseline, shared with `gold_suite.py` |
-| `ORDER_ITEMS_DEDUP_RATE` | `0.02` | matches `generator_config.yaml`'s `duplicate_rate_offline` |
+| `ORDER_ITEMS_DEDUP_RATE` | `0.01` | actual fraction of Bronze rows a correct dedup removes — half of `generator_config.yaml`'s `duplicate_rate_offline` (`0.02`), because the generator injects `dup_rate/2` extra-copy rows; that config value instead matches `quality_report.txt`'s `duplicated(keep=False)` measurement, which double-counts each duplicate pair. Confirmed against live Bronze data: 909,000 → 899,999 true-unique rows (~0.99%) |
 | `ORDER_ITEMS_DEDUP_TOLERANCE` | `0.01` | ±1pp band around the dedup rate |
 
 ---

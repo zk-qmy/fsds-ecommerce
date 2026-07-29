@@ -22,7 +22,7 @@ follows in a separate change, against this plan.
 - `b_schema_pipelines/dq/README.md` — the §9 suite factories this plan wires up.
 - Existing pipeline code: `pipeline_base.py`, `ingest_bronze.py`, `bronze_config.yaml`,
   `transform_silver.py`, `build_gold.py`, `feat_customer_90d.py`, `feat_stream_60m.py`,
-  `feat_customer_unified.py`, `flink_stream_pipeline.py`.
+  `feat_customer_unified.py`, `offline_stream_pipeline.py`.
 - `infra/docker-compose.yml` — the existing (commented-out, unused) `airflow` and `spark`
   service stubs, and `b_schema_pipelines/Dockerfile` (the existing, also-unused, Spark image).
 - Live PyPI/Docker Hub checks (not assumed from memory) for every version number below.
@@ -61,7 +61,7 @@ bar doesn't require either literal class.
 
 | Exists today | New in this plan |
 |---|---|
-| `ingest_bronze.py`, `transform_silver.py`, `build_gold.py`, `feat_customer_90d.py`, `feat_stream_60m.py`, `feat_customer_unified.py`, `flink_stream_pipeline.py` — all runnable via `uv run python3 <script>.py`, **unmodified by this plan** | `b_schema_pipelines/dags/dp1_bronze_dag.py`, `dp2_gold_dag.py`, `dp3_feature_dag.py` |
+| `ingest_bronze.py`, `transform_silver.py`, `build_gold.py`, `feat_customer_90d.py`, `feat_stream_60m.py`, `feat_customer_unified.py`, `offline_stream_pipeline.py` — all runnable via `uv run python3 <script>.py`, **unmodified by this plan** | `b_schema_pipelines/dags/dp1_bronze_dag.py`, `dp2_gold_dag.py`, `dp3_feature_dag.py` |
 | `b_schema_pipelines/dq/{common,bronze_suite,silver_suite,gold_suite}.py` — pure suite factories, **unmodified by this plan** | `b_schema_pipelines/dq/validation_runner.py` — the only new *pipeline* code; collects runtime inputs (row counts, FK key sets) and calls the existing factories |
 | `infra/docker-compose.yml`'s commented-out `airflow`/`spark` service stubs | `infra/airflow/Dockerfile` (new); `infra/docker-compose.yml`'s `airflow` service uncommented + rewritten (needs your approval — root-level file, per this repo's standing rule) |
 | — | Airflow Variables (`repo_root`) and Connections (`fsds_postgres`, `fsds_minio`), set once via the Airflow UI/CLI, never hardcoded in DAG files |
@@ -174,7 +174,7 @@ infra/airflow/Dockerfile
 
 | Task type | Runs as | Which Python | How it reaches project code |
 |---|---|---|---|
-| Ingest/transform/build/feature (`ingest_bronze.py`, `transform_silver.py`, `build_gold.py`, `feat_*.py`, `flink_stream_pipeline.py`) | `BashOperator` | `/opt/venvs/project` (3.13) | `cd {{ var.value.repo_root }} && uv run python3 <script>.py <args>` — identical to what every pipeline's own README already documents; Airflow never imports this code |
+| Ingest/transform/build/feature (`ingest_bronze.py`, `transform_silver.py`, `build_gold.py`, `feat_*.py`, `offline_stream_pipeline.py`) | `BashOperator` | `/opt/venvs/project` (3.13) | `cd {{ var.value.repo_root }} && uv run python3 <script>.py <args>` — identical to what every pipeline's own README already documents; Airflow never imports this code |
 | Validate (all three DAGs) | `ExternalPythonOperator` | `/opt/venvs/project/bin/python3` (3.13) — **not** Airflow's own 3.12 interpreter | Airflow's DAG-parsing code (3.12) resolves the Postgres/MinIO Airflow Connection into plain values, then hands them as `op_kwargs` to a callable in `b_schema_pipelines.dq.validation_runner`, executed via cloudpickle in the target venv (built-in Airflow 2.4+ mechanism, no new framework) |
 | Cross-DAG wait (`dp2`→`dp1`, `dp3`→`dp2`) | `ExternalTaskSensor` | Airflow's own 3.12 env | Core Airflow sensor — reads Airflow's own metadata DB, no project code involved |
 
@@ -273,34 +273,50 @@ check. Both via the same `psycopg2` connection pattern `build_gold.py` already u
 ## 8. `dp3_feature` — tasks
 
 ```
-wait_for_gold (ExternalTaskSensor)
-        │
-        ▼
-run_flink  ──────────────┐
-        │                │
-        ▼                ▼
-feat_customer_90d   feat_stream_60m
-        │                │
-        └───────┬────────┘
-                 ▼
-        feat_customer_unified
-                 │
-                 ▼
-          validate_features
+                    wait_for_gold (ExternalTaskSensor)
+                    │                              │
+                    ▼                              ▼
+             run_flink  ───┐          feat_product_90d  feat_customer_product_interaction
+                    │      │                    │                    │
+                    ▼      ▼                    │                    │
+       feat_customer_90d   feat_stream_60m       │                    │
+                    │           │                │                    │
+                    └─────┬─────┘                │                    │
+                          ▼                       │                    │
+                feat_customer_unified             │                    │
+                          │                       │                    │
+                          └──────────┬────────────┴────────────────────┘
+                                     ▼
+                           feat_homepage_unified
+                                     │
+                                     ▼
+                            validate_features
 ```
 
 | Task | Operator | Command / callable | Input | Output |
 |---|---|---|---|---|
 | `wait_for_gold` | `ExternalTaskSensor` | waits on `dp2_gold.validate_gold`, `execution_delta=timedelta(hours=1, minutes=30)` | `dp2_gold`'s run | unblocks once Gold's validate task succeeds |
-| `run_flink` | `BashOperator` | `uv run --no-project --python 3.12 --with apache-flink python3 b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode optimized` | `a_data_generator/outputs/streaming/events.json` | cleaned/deduped/windowed events at `b_schema_pipelines/streaming_data/flink_clean_events/optimized/` |
+| `run_flink` | `BashOperator` | `uv run --no-project --python 3.12 --with apache-flink python3 b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode optimized` | `a_data_generator/outputs/streaming/events.json` | cleaned/deduped/windowed events at `b_schema_pipelines/streaming_data/flink_clean_events/optimized/` |
 | `feat_customer_90d` | `BashOperator` | `uv run python3 b_schema_pipelines/pipelines/features/feat_customer_90d.py --snapshot-date {{ ds }}` | Gold `fact_order`/`fact_order_item`/`dim_date` | rows in Postgres `feat_customer_90d` |
 | `feat_stream_60m` | `BashOperator` | `uv run python3 b_schema_pipelines/pipelines/features/feat_stream_60m.py --events-source b_schema_pipelines/streaming_data/flink_clean_events/optimized` | Flink's cleaned output | rows in Postgres `feat_stream_60m` |
 | `feat_customer_unified` | `BashOperator` | `uv run python3 b_schema_pipelines/pipelines/features/feat_customer_unified.py` | `feat_customer_90d` + `feat_stream_60m` | rows in Postgres `feat_customer_unified` |
-| `validate_features` | `ExternalPythonOperator` | `validation_runner.validate_feature_tables(postgres_conn, baseline_row_counts)` | all three feature tables | raises on failure |
+| `feat_product_90d` | `BashOperator` | `uv run python3 b_schema_pipelines/pipelines/features/feat_product_90d.py --snapshot-date {{ ds }}` | Gold `dim_product`/`dim_date`/`fact_order`/`fact_order_item` + raw `events.json` | rows in Postgres `feat_product_90d` |
+| `feat_customer_product_interaction` | `BashOperator` | `uv run python3 b_schema_pipelines/pipelines/features/feat_customer_product_interaction.py --snapshot-date {{ ds }}` | same sources as `feat_product_90d` | rows in Postgres `feat_customer_product_interaction_90d` |
+| `feat_homepage_unified` | `BashOperator` | `uv run python3 b_schema_pipelines/pipelines/features/feat_homepage_unified.py --snapshot-date {{ ds }}` | `feat_customer_unified` + `feat_product_90d` + `feat_customer_product_interaction` | rows in Postgres `feat_homepage_unified` |
+| `validate_features` | `ExternalPythonOperator` | `validation_runner.validate_feature_tables(postgres_conn)` — no `tables=` filter | all 6 `FEATURE_TABLES` | raises on failure |
 
 `feat_customer_90d` and `feat_stream_60m` run in parallel (both depend only on `run_flink` +
 `wait_for_gold`, not on each other) — `feat_customer_unified` depends on both, matching
 `feat_customer_unified.py`'s own as-of join needing both tables populated first.
+`feat_product_90d`/`feat_customer_product_interaction` depend only on `wait_for_gold` (Gold +
+raw `events.json`, no Flink dependency) and run in parallel with the `run_flink` branch, not
+after it. Both branches converge at `feat_homepage_unified`, which needs all three of
+`feat_customer_unified`, `feat_product_90d`, and `feat_customer_product_interaction` populated
+first for its candidate-generation join.
+
+Confirmed live (2026-07-29): all 6 feature tasks + `validate_features` succeed end-to-end
+against real Gold/Silver data, `tests/dags/test_dags.py::test_dp3_feature_task_graph_matches_plan`
+updated to match this graph.
 
 **`--snapshot-date {{ ds }}`** is templated to the DAG's logical date rather than left at
 `feat_customer_90d.py`'s own default (`datetime.now()`) — this is the one place this plan adds
@@ -312,12 +328,16 @@ process whatever is currently in their input tables) — nothing to template the
 
 **`dq/gold_suite.py`/`silver_suite.py` aren't reused for feature tables** — `feat_customer_90d`
 and `feat_stream_60m` aren't Gold tables in `build_gold.py`'s sense (no surrogate keys, no
-dims), but they share Gold's storage (Postgres) and most of its check shape (schema, null-PK
-on `(customer_id, event_timestamp)`, volume). `validate_feature_tables` calls
-`gold_expectation_suite(table, expected_columns, pk_columns=["customer_id", "event_timestamp"], baseline_row_count=...)`
-directly — no `unique_column`/`fk_checks` (feature tables have neither) — rather than adding a
-fourth `dq/*_suite.py` file for two checks that already exist. This is a deliberate reuse, not
-a new module, called out here so it doesn't look like an oversight.
+dims), but they share Gold's storage (Postgres) and most of its check shape (schema, null-PK,
+volume). `validate_feature_tables` calls `gold_expectation_suite(table, expected_columns,
+pk_columns=..., baseline_row_count=...)` directly — no `unique_column`/`fk_checks` (feature
+tables have neither) — rather than adding a fourth `dq/*_suite.py` file for two checks that
+already exist. This is a deliberate reuse, not a new module, called out here so it doesn't look
+like an oversight. `pk_columns` is looked up per table via `FEATURE_TABLE_PK_COLUMNS`, not a
+shared `["customer_id", "event_timestamp"]` literal — that was true for all 3 tables this DAG
+writes, but broke the moment `feat_product_90d` (product-keyed) and the pair-keyed tables were
+added elsewhere in the same module (a real bug, found and fixed — see
+`dq/validation_runner.py`'s module docstring).
 
 ---
 

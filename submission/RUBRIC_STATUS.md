@@ -86,7 +86,7 @@ Legend: ✅ done + proof exists · 🟡 code done, proof missing/incomplete · �
 | | Burst fix | 3.0 | 🟡 | Code + explanation done (`02_spark_optimisation_report.md` Fix D), screenshot missing. |
 | | Late arrival fix | 3.0 | 🟡 | Fix E, same gap. |
 | | Other problem fix (dedup) | 3.0 | 🟡 | Fix F, same gap. |
-| | Window processing | 2.0 | ✅ | Code exists in `flink_stream_pipeline.py`; a code capture (not a UI screenshot) satisfies this item per the rubric wording. |
+| | Window processing | 2.0 | ✅ | Code exists in `offline_stream_pipeline.py`; a code capture (not a UI screenshot) satisfies this item per the rubric wording. |
 | Storage | Lakehouse optimization | 2.0 | ✅ | Rubric wants **"Capture đoạn code và phân tích"** (code + analysis capture, not a UI screenshot) — fully satisfied in `gold/README.md`'s Storage section: real `z_order`/`optimize` code + why-it-helps analysis. |
 | | Warehouse optimization (indexing) | 2.0 | ✅ | Same section — real `_create_indexes()` code + analysis + an `EXPLAIN ANALYZE` verification query. Confirmed both Z-order and indexing are actually implemented in code. |
 | Orchestration | DP1 ingest stage | 2.0 | 🟡 | DAG genuinely verified working end-to-end against local docker-compose (MinIO/Postgres) — see `b_schema_pipelines/dags/plan.md`. Rubric's literal ask is a screenshot **"showing the stages and their order"** — the DAG **Graph view** satisfies this even without a live run; `assets/draft-airflow.png` is the wrong view (DAGs-list, not Graph) and shows 0 runs — still the one outstanding piece, but a lower bar than a green-run screenshot. |
