@@ -79,7 +79,7 @@ and joining the results in application code.
 
 ### The idea
 
-Trino (already running for Bronze/Silver browsing, per `docs/02_schema_piplines.md`) can hold
+Trino (already running for Bronze/Silver browsing, per `SCHEMA_DESIGN.md`) can hold
 **two catalogs simultaneously** — a `delta` catalog (Bronze/Silver, via the Hive Metastore
 pointed at MinIO) and a `postgres` catalog (Gold, connected directly to `fsds-postgres`) — and
 join across them in a single SQL statement, something neither Delta Lake nor PostgreSQL can
@@ -102,7 +102,7 @@ container, not assumed from docs — see `features/README.md` §12 for the full 
 
 1. **Delta Lake tables Spark wrote to MinIO were never registered into the Hive Metastore
    Trino reads from** — writing a Delta table to a path doesn't auto-register it. Fixed with
-   `b_schema_pipelines/docs/register_bronze_silver_trino.sql`, using the connector's
+   `b_schema_pipelines/register_bronze_silver_trino.sql`, using the connector's
    `register_table` system procedure (the more obvious `CREATE TABLE ... WITH (location=...)`
    syntax hit a parser error on this Trino version — confirmed live, not a guess) — one line
    in `delta.properties` (`delta.register-table-procedure.enabled=true`) plus a container

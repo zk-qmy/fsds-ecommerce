@@ -210,7 +210,7 @@ yet, so this also becomes the first piece of `d_ml`'s data/feature layer)
 - Docs to update: `b_schema_pipelines/pipelines/streaming/README.md` (Kafka now real, not a
   stand-in — architecture diagram changes), `b_schema_pipelines/pipelines/features/README.md`
   (drop the "Section 04, out of scope here" line, add `push_stream_to_feast.py` section), new
-  `d_ml/feature_repo/README.md`, `b_schema_pipelines/docs/02_schema_piplines.md` (its "In prod
+  `d_ml/feature_repo/README.md`, `b_schema_pipelines/SCHEMA_DESIGN.md` (its "In prod
   this is a Kafka topic" line becomes "this is a Kafka topic, including in local dev").
 
 ## Open questions to resolve before implementation starts

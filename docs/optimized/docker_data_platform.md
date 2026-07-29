@@ -1,6 +1,6 @@
 # Docker Image Optimisation — Data Platform (`b_schema_pipelines/Dockerfile`)
 
-`docs/docker_optimize.md` (root) documents the ML inference API's image
+`docs/optimized/docker_inference_api.md` (root) documents the ML inference API's image
 (`d_ml/api/Dockerfile`) — this doc covers the **data platform's own** image, the one Spark
 jobs actually run in, which didn't have an equivalent write-up before this pass.
 

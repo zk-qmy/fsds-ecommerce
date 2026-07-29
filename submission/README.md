@@ -1,11 +1,10 @@
 # Submission — Data Platform (mini-coursework, `coursework/rubrics.md`)
 
-This folder is a **standalone, self-contained copy** of the evidence/documentation for the
-Data Platform track's rubric items — organized by rubric section, not by repo layout, so it
-can be reviewed folder-by-folder against `coursework_rubrics.md` (copied here too) without
-navigating the live codebase. Everything here is a **copy**; the originals live in their
-normal repo locations (each file below notes its source path) and keep working normally —
-nothing was moved or deleted from the working tree.
+This folder is organized by **rubric section**, not by repo layout, so it can be reviewed
+folder-by-folder against the rubric. Each file here is a short summary — status, points, and
+the compact proof/checklist — with a link to the canonical write-up in its normal repo
+location, rather than a full copy. Only real evidence artifacts (screenshots, generated config
+snapshots, quality reports) live directly in this folder.
 
 **`RUBRIC_STATUS.md`** is the master audit — a full item-by-item table against every line in
 the rubric, with point values and honest status (done+proof / code-done-proof-missing /
@@ -32,7 +31,7 @@ evidence each row points to.
 | [`03_processing_jobs/spark/`](03_processing_jobs/spark/) | Spark job (offline problems) | 16 | 🟡 code + written analysis done, integrated into Airflow; **Spark UI screenshots not captured** |
 | [`03_processing_jobs/flink/`](03_processing_jobs/flink/) | Flink job (streaming problems) | 13 | 🟡 code + written analysis done; window-processing code capture ✅ complete; **Flink UI screenshots not captured** |
 | [`04_data_storage/`](04_data_storage/) | Data Storage optimization | 4 | ✅ done — rubric wants code + analysis (not a screenshot) here, fully satisfied |
-| [`05_data_pipeline_orchestration/`](05_data_pipeline_orchestration/) | DP1/DP2/DP3 orchestration | 12 | 🟡 all 3 DAGs verified running correctly end-to-end against local docker-compose; **Airflow UI Graph-view screenshot not captured** — `draft-airflow.png` included but doesn't satisfy this (wrong view, 0 runs) |
+| [`05_data_pipeline_orchestration/`](05_data_pipeline_orchestration/) | DP1/DP2/DP3 orchestration | 12 | 🟡 all 3 DAGs verified running correctly end-to-end against local docker-compose; **Airflow UI Graph-view screenshot not captured** — `assets/draft-airflow.png` doesn't satisfy this (wrong view, 0 runs) |
 | [`06_data_governance/`](06_data_governance/) | DataHub lineage/contracts | 12 | ❌ not started — status note only, no evidence to show |
 | [`07_documentation_schema_design/`](07_documentation_schema_design/) | Schema design (DBeaver) | 10 | 🟡 Gold zone fully visualized (2 real screenshots); real `FOREIGN KEY` constraints now declared in `build_gold.py` (code done) — Bronze/Silver zone and a re-captured dim/fact FK-relationship-lines screenshot still outstanding |
 | [`08_novel_ideas/`](08_novel_ideas/) | Novel ideas | 10 | ✅ done — 2 real, already-implemented techniques with proof |

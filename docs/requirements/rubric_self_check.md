@@ -64,9 +64,9 @@ Legend: ✅ done + proof exists · 🟡 code done, proof missing/incomplete · �
 
 | Section | Item | Pts | Status | Notes |
 |---|---|---|---|---|
-| Docker & Compose | Used | 1.0 | ✅ | `infra/docker-compose.yml` works; `docs/02_docker_optimize.md` now documents the data-platform image specifically (measured, not estimated). |
-| Docker & Compose | Optimized (multistage) | 2.0 | ✅ | `b_schema_pipelines/Dockerfile` converted to multi-stage; `docs/02_docker_optimize.md` — **5.7 GB → 2.79 GB, 51% reduction, real measured sizes**. Also found and fixed a pre-existing latent bug (missing `README.md` in the `COPY`, made `uv sync` fail on a true cache-miss build) affecting both baseline and optimized. |
-| Data Generator (offline) | Skew | 2.0 | ✅ | `a_data_generator/docs/01_data_generator.md` §8.2, real numbers captured in `quality_report.txt`. |
+| Docker & Compose | Used | 1.0 | ✅ | `infra/docker-compose.yml` works; `docs/optimized/docker_data_platform.md` now documents the data-platform image specifically (measured, not estimated). |
+| Docker & Compose | Optimized (multistage) | 2.0 | ✅ | `b_schema_pipelines/Dockerfile` converted to multi-stage; `docs/optimized/docker_data_platform.md` — **5.7 GB → 2.79 GB, 51% reduction, real measured sizes**. Also found and fixed a pre-existing latent bug (missing `README.md` in the `COPY`, made `uv sync` fail on a true cache-miss build) affecting both baseline and optimized. |
+| Data Generator (offline) | Skew | 2.0 | ✅ | `a_data_generator/README.md` §8.2, real numbers captured in `quality_report.txt`. |
 | | Cardinality | 2.0 | ✅ | §8.1, `approx_count_distinct` results documented. |
 | | Schema evolution | 2.0 | ✅ | §8.3. |
 | | Duplicate rows (Problem C) | 2.0 | ✅ | §8.4. |
@@ -76,7 +76,7 @@ Legend: ✅ done + proof exists · 🟡 code done, proof missing/incomplete · �
 | | Late arrivals | 2.0 | ✅ | §8.5. |
 | | Duplicate event_ids | 2.0 | ✅ | §8.5. |
 | | Generator config used | 2.0 | ✅ | Same config file, streaming section. |
-| Spark jobs | Baseline (no opt.) | 2.0 | 🟡 | `docs/02_spark_optimisation_report.md` describes baseline runs, but the **screenshot checklist at the bottom of that doc is unfulfilled** — no `b_schema_pipelines/docs/screenshots/` directory exists. |
+| Spark jobs | Baseline (no opt.) | 2.0 | 🟡 | `docs/optimized/spark_flink_pipeline.md` describes baseline runs, but the **screenshot checklist at the bottom of that doc is unfulfilled** — no `b_schema_pipelines/docs/screenshots/` directory exists. |
 | | Skew fix (AQE) | 3.0 | 🟡 | Code done (`transform_silver.py`), explanation written, **before/after Spark UI screenshots not captured**. |
 | | Cardinality/broadcast join | 3.0 | 🟡 | Same — code + explanation done, screenshots missing. |
 | | Schema evolution fix | 3.0 | 🟡 | Same. |
@@ -102,8 +102,8 @@ Legend: ✅ done + proof exists · 🟡 code done, proof missing/incomplete · �
 | | Feature tables (2 cols) | 2.0 | ✅ | Same screenshots show `feat_customer_90d`/`feat_stream_60m`/`feat_customer_unified` with `event_timestamp`+`created_ts`. |
 | | Dim/fact relationships | 2.0 | 🟡 | **Code done, screenshot outstanding.** `build_gold.py` now declares real `FOREIGN KEY` constraints (`_create_foreign_keys()`, see `gold/README.md`'s "Dim/fact relationships" section) — DBeaver's ER diagram will render the relationship lines once re-opened against a freshly-run Gold schema. The existing screenshot predates this change and still shows standalone boxes. |
 | | Naming convention | 2.0 | ✅ | `dim_`/`fact_`/`obt_`/`feat_` prefixes consistently used; visible in the same screenshots. |
-| Novel ideas | Idea 1 | 5.0 | ✅ | `docs/novel_ideas.md` — `uv run --no-project` for ephemeral multi-Python-version envs (solves the Flink/Airflow dependency-conflict problem), with proof it's actually used in 3 places in the repo. |
-| | Idea 2 | 5.0 | ✅ | `docs/novel_ideas.md` — Trino as a federation layer joining Delta Lake + PostgreSQL in one query, with live verification commands and the real bug fixes it took to get working. |
+| Novel ideas | Idea 1 | 5.0 | ✅ | `docs/requirements/novel_ideas.md` — `uv run --no-project` for ephemeral multi-Python-version envs (solves the Flink/Airflow dependency-conflict problem), with proof it's actually used in 3 places in the repo. |
+| | Idea 2 | 5.0 | ✅ | `docs/requirements/novel_ideas.md` — Trino as a federation layer joining Delta Lake + PostgreSQL in one query, with live verification commands and the real bug fixes it took to get working. |
 
 **Rough tally**: ~75-80 pts worth of items now have working code **and** proof.
 What remains blocked purely on **screenshots that haven't been taken yet** (~25-30 pts):
