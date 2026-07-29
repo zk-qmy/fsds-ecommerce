@@ -30,7 +30,7 @@ interaction with the main project's environment at all:
 ```bash
 # Flink job — separate Python 3.12 env, apache-flink installed on demand
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode optimized
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode optimized
 
 # DAG tests — separate env with the exact Airflow version pinned, isolated
 # from the main project's pyspark/deltalake/great-expectations dependency set
@@ -48,7 +48,7 @@ every invocation.
 
 ### Where it's used
 
-- `b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py` — every run, documented
+- `b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py` — every run, documented
   in `pipelines/streaming/README.md`.
 - `tests/dags/test_dags.py` — every CI run, wired into `.github/workflows/ci.yml`'s
   `dag-tests` job (per `dags/plan.md` §13).

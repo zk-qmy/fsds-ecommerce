@@ -14,7 +14,7 @@
 UI screenshot — fully satisfiable here):
 
 ```python
-# b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py
+# b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py
 # keyBy(customer_id) -> 1-hour tumbling event-time windows -> per-window view count
 (
     cleaned_stream
@@ -119,18 +119,18 @@ cd /mnt/d/fsds-ecommerce
 # Step 1 — baseline (capture Flink UI "before" screenshots: backpressure HIGH,
 # numLateRecordsDropped > 0, duplicate event_ids reaching the sink)
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode baseline
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode baseline
 
 # Step 2 — optimized (capture Flink UI "after" screenshots)
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode optimized
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode optimized
 ```
 
 Optional overrides:
 
 ```bash
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py \
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py \
     --mode optimized \
     --events-source a_data_generator/outputs/streaming/events.json \
     --sink-dir b_schema_pipelines/streaming_data/flink_clean_events
@@ -148,7 +148,7 @@ one:
 
 ```bash
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py \
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py \
     --mode optimized --web-ui
 # UI at http://localhost:8081 while the job runs (the process stays alive for
 # the job's full duration — the UI won't be reachable after it exits)
@@ -224,3 +224,252 @@ The one function worth unit-testing in isolation, `ParseEvent.map`'s malformed-J
 would need to import `pyflink.datastream.functions.MapFunction` to subclass it, which pulls the
 same environment problem back in — not worth a second Python environment in the main test run
 for one `try/except json.loads`.
+
+
+# Explanation
+
+---
+
+# Block 1. Setup
+
+```python
+import ...
+```
+
+**Purpose:**
+
+* Import Flink libraries
+* Define constants
+
+```python
+LATE_ARRIVAL_MINUTES = 45
+WINDOW_HOURS = 1
+```
+
+Think of it as:
+
+> "Configure the pipeline."
+
+---
+
+# Block 2. Read Events
+
+```python
+class ParseEvent(MapFunction):
+```
+
+**Input**
+
+```json
+"{\"customer_id\":\"C1\",\"event\":\"view\"}"
+```
+
+↓
+
+**Output**
+
+```python
+{
+    "customer_id":"C1",
+    "event":"view"
+}
+```
+
+It simply **reads each JSON line**.
+
+---
+
+# Block 3. Remove Duplicates
+
+```python
+class DedupByEventId(KeyedProcessFunction):
+```
+
+Input
+
+```
+Event 1
+Event 2
+Event 1
+```
+
+↓
+
+Output
+
+```
+Event 1
+Event 2
+```
+
+Uses `event_id` to remember what has already been seen.
+
+---
+
+# Block 4. Handle Late Events
+
+```python
+EventTimestampAssigner
+```
+
+and
+
+```python
+_apply_watermark_strategy()
+```
+
+This tells Flink:
+
+> "Events can arrive up to 45 minutes late."
+
+Without this
+
+```
+10:00
+10:30
+10:10 (late)
+```
+
+The last event might be ignored.
+
+---
+
+# Block 5. Window Aggregation
+
+```python
+ViewCountAggregate
+```
+
+This is basically
+
+```python
+count += 1
+```
+
+for every `"view"` event.
+
+Example
+
+```
+Alice viewed
+Alice viewed
+Alice purchased
+```
+
+Result
+
+```
+Alice viewed = 2
+```
+
+---
+
+# Block 6. Add Window Information
+
+```python
+ViewCountWindowResult
+```
+
+After counting, Flink only knows
+
+```
+2
+```
+
+This class changes it into
+
+```json
+{
+  "customer_id":"Alice",
+  "window":"10-11",
+  "view_count":2
+}
+```
+
+Now the result is meaningful.
+
+---
+
+# Block 7. Pipeline
+
+This is the important part.
+
+```python
+run()
+
+    ↓
+
+_build_env()
+
+    ↓
+
+_read_and_clean()
+
+    ↓
+
+_apply_windowing()
+
+    ↓
+
+_write_sink()
+
+    ↓
+
+execute()
+```
+
+This is the whole pipeline.
+
+Or even simpler:
+
+```text
+Read events
+      ↓
+Parse JSON
+      ↓
+Remove duplicates
+      ↓
+Handle late events
+      ↓
+Count views every hour
+      ↓
+Save results
+```
+
+---
+
+# Everything else
+
+Most of the remaining code is **production infrastructure**, not Flink logic:
+
+* `logging` → logs
+* `_build_env()` → create Flink environment
+* `_write_sink()` → save files
+* `_log_run()` → record pipeline execution
+* `argparse` → read command-line arguments
+
+These don't implement the streaming algorithm—they make the pipeline easier to run, monitor, and debug.
+
+## If this were written for teaching
+
+The entire file could be reduced conceptually to:
+
+```python
+env = StreamExecutionEnvironment.get_execution_environment()
+
+events = read_json()
+
+events = parse(events)
+
+events = remove_duplicates(events)
+
+events = handle_late_events(events)
+
+view_counts = count_views_per_hour(events)
+
+save(events)
+
+save(view_counts)
+
+env.execute()
+```

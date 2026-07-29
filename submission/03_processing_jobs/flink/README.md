@@ -14,7 +14,7 @@
 UI screenshot — fully satisfiable here):
 
 ```python
-# b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py
+# b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py
 # keyBy(customer_id) -> 1-hour tumbling event-time windows -> per-window view count
 (
     cleaned_stream
@@ -119,18 +119,18 @@ cd /mnt/d/fsds-ecommerce
 # Step 1 — baseline (capture Flink UI "before" screenshots: backpressure HIGH,
 # numLateRecordsDropped > 0, duplicate event_ids reaching the sink)
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode baseline
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode baseline
 
 # Step 2 — optimized (capture Flink UI "after" screenshots)
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode optimized
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode optimized
 ```
 
 Optional overrides:
 
 ```bash
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py \
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py \
     --mode optimized \
     --events-source a_data_generator/outputs/streaming/events.json \
     --sink-dir b_schema_pipelines/streaming_data/flink_clean_events
@@ -148,7 +148,7 @@ one:
 
 ```bash
 uv run --no-project --python 3.12 --with apache-flink python3 \
-    b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py \
+    b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py \
     --mode optimized --web-ui
 # UI at http://localhost:8081 while the job runs (the process stays alive for
 # the job's full duration — the UI won't be reachable after it exits)

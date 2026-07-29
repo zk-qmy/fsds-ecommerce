@@ -128,13 +128,19 @@ Screenshot to capture: **SQL plan showing the two CASE-WHEN fill nodes on the or
 
 ---
 
-## Fix 3 — Window Dedup (Problem C: 2 % duplicate order_items)
+## Fix 3 — Window Dedup (Problem C: ~2 % duplicate order_items injected, ~1 % actually removable)
 
 ### What was injected
 
-`order_items` has 2 % of rows duplicated by natural key
-`(order_id, product_id, unit_price)`. The generator appends exact-copy rows
-(same `order_item_id`, same all fields).
+The generator injects `dup_rate/2` exact-copy rows (same `order_item_id`, same
+all fields) — with `duplicate_rate_offline: 0.02`, that's ~1 % of rows getting
+one extra copy each. The 2 % figure in the config / `quality_report.txt` is
+measured via `duplicated(keep=False)`, which flags *both* the original and its
+copy per pair, so it reads roughly double the true injected fraction. The
+natural key that actually identifies a duplicate pair is
+`(order_id, product_id, unit_price, quantity)` — `quantity` matters: two
+distinct rows can legitimately share `(order_id, product_id, unit_price)` if a
+customer ordered the same product twice at different quantities in one order.
 
 ### How to identify — Spark UI (baseline run)
 
@@ -142,7 +148,7 @@ Screenshot to capture: **SQL plan showing the two CASE-WHEN fill nodes on the or
 
 | Metric | What to look for |
 |---|---|
-| Output rows reported in log | ~909,000 instead of the expected ~890,000 |
+| Output rows reported in log | ~909,000 instead of the expected ~900,000 |
 | No dedup stage | The plan is a straight scan → count; no Exchange node |
 
 Screenshot to capture: **Jobs tab showing order_items count job with ~909 k rows, plan with no Exchange.**
@@ -151,7 +157,9 @@ Screenshot to capture: **Jobs tab showing order_items count job with ~909 k rows
 
 ```python
 # transform_silver.py — _fix_duplicates()
-window = Window.partitionBy("order_id", "product_id", "unit_price").orderBy(
+window = Window.partitionBy(
+    "order_id", "product_id", "unit_price", "quantity"
+).orderBy(
     F.col("ingest_ts").asc(), F.col("order_item_id").asc()
 )
 order_items_df \
@@ -167,12 +175,12 @@ order_items_df \
 | Metric | What changes |
 |---|---|
 | Stage DAG | An Exchange (shuffle) node appears before the Window aggregate |
-| Output rows in log | ~890,000 (≈ 2 % fewer than baseline) |
+| Output rows in log | ~900,000 (≈ 1 % fewer than baseline) |
 | Shuffle Read bytes | Non-zero — data moved across partitions for the Window |
 
 Screenshot to capture:
 1. **Stages DAG showing the Exchange node for the Window shuffle.**
-2. **Log output showing rows_in ~909 k → rows_out ~890 k.**
+2. **Log output showing rows_in ~909 k → rows_out ~900 k.**
 
 ---
 
@@ -232,7 +240,7 @@ Screenshot to capture: **SQL DAG showing BroadcastHashJoin with zero Exchange on
 
 ## Flink Fixes (Problems D / E / F)
 
-Implemented in `b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py`
+Implemented in `b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py`
 (`FlinkStreamPipeline`, `--mode baseline|optimized`) — **not** `feat_stream_60m.py`, which is
 a plain Spark job that only computes feature aggregates from whatever clean event stream this
 Flink pipeline produces. See `streaming/README.md` for full run instructions, including why
@@ -262,7 +270,7 @@ Screenshot to capture: **Subtasks panel showing Backpressure: HIGH on source.**
 #### Fix in code — `FlinkStreamPipeline._build_env`
 
 ```python
-# flink_stream_pipeline.py
+# offline_stream_pipeline.py
 if self.mode == "optimized":
     env.set_buffer_timeout(BUFFER_TIMEOUT_MS)   # 100ms — Flink's own default, made explicit
 else:
@@ -300,7 +308,7 @@ Screenshot to capture: **Metrics panel showing numLateRecordsDropped > 0.**
 #### Fix in code — `FlinkStreamPipeline._apply_watermark_strategy`
 
 ```python
-# flink_stream_pipeline.py
+# offline_stream_pipeline.py
 if self.mode == "optimized":
     strategy = WatermarkStrategy.for_bounded_out_of_orderness(
         Duration.of_minutes(LATE_ARRIVAL_MINUTES)   # 45 — covers the injected 5-45min range
@@ -349,7 +357,7 @@ print('total:', len(ids), 'distinct:', len(set(ids)))"
 #### Fix in code — `DedupByEventId` (`KeyedProcessFunction`), applied by `_apply_dedup`
 
 ```python
-# flink_stream_pipeline.py
+# offline_stream_pipeline.py
 class DedupByEventId(KeyedProcessFunction):
     def open(self, runtime_context) -> None:
         ttl_config = StateTtlConfig.new_builder(Time.hours(DEDUP_STATE_TTL_HOURS)).build()
@@ -384,7 +392,7 @@ Screenshot to capture (after — `--mode optimized`): **duplicate count query ab
 | 1b | AQE skewJoin | Spark History | Stage detail → skew flag | No flag | "Skew: true" |
 | 2 | NULL fill | DBeaver | Query result | NULL count > 0 | NULL count = 0 |
 | 3a | Window dedup | Spark History | Stages → DAG | No Exchange | Exchange node |
-| 3b | Window dedup | Terminal / log | rows_in vs rows_out | ~909 k = ~909 k | ~909 k → ~890 k |
+| 3b | Window dedup | Terminal / log | rows_in vs rows_out | ~909 k = ~909 k | ~909 k → ~900 k |
 | 4 | Broadcast join | Spark History | SQL → plan DAG | SortMergeJoin + 2 Exchange | BroadcastHashJoin + 0 Exchange |
 | 5 | Buffer timeout / backpressure | Flink UI | Subtasks → Backpressure | HIGH (`--mode baseline`) | OK (`--mode optimized`) |
 | 6 | Bounded out-of-orderness watermark | Flink UI | Metrics → numLateRecordsDropped | > 0 (`--mode baseline`) | = 0 (`--mode optimized`) |

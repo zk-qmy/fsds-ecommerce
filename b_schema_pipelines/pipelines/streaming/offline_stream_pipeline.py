@@ -1,5 +1,5 @@
 """
-flink_stream_pipeline — Section 02 Flink streaming pipeline (Problems D/E/F).
+offline_stream_pipeline — Section 02 Flink streaming pipeline (Problems D/E/F).
 
 Reads a_data_generator/outputs/streaming/events.json as a bounded file source
 (the local-dev stand-in for the Kafka topic described in docs/02_schema_piplines.md),
@@ -34,9 +34,9 @@ wheel, and this repo's main venv is pinned to >=3.13. See streaming/README.md.
 
 Run (from repo root):
     uv run --no-project --python 3.12 --with apache-flink \
-        python3 b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode baseline
+        python3 b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode baseline
     uv run --no-project --python 3.12 --with apache-flink \
-        python3 b_schema_pipelines/pipelines/streaming/flink_stream_pipeline.py --mode optimized
+        python3 b_schema_pipelines/pipelines/streaming/offline_stream_pipeline.py --mode optimized
 """
 
 from __future__ import annotations
