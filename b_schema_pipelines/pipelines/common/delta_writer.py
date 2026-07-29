@@ -157,6 +157,14 @@ class DeltaWriter:
         append if this exact source_file is already present in the target
         table. Correct for this repo's static demo source files, which
         don't change content between re-runs of the same path.
+
+        `source_file` should be a canonical/relative identifier, not a raw
+        absolute path — the caller (`ingest_bronze.py`'s `_relative_source`)
+        learned this live: the same physical file resolves to a different
+        absolute path depending on whether the script runs on the host or
+        inside the Airflow container, which silently defeated this exact
+        "already ingested" check and let order_items/events each get
+        ingested twice.
         """
         if self.table_exists(output_path):
             already_ingested = (

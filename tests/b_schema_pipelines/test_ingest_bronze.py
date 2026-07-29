@@ -156,6 +156,43 @@ def test_add_ingest_metadata_row_count_unchanged(ingester, spark):
     assert result.count() == 3
 
 
+# ── 2b. _relative_source ──────────────────────────────────────────────────────
+
+def test_relative_source_strips_source_dir_prefix(ingester, source_dir):
+    absolute = str(source_dir / "offline" / "order_items.parquet")
+    assert ingester._relative_source(absolute) == "offline/order_items.parquet"
+
+
+def test_relative_source_stable_across_offline_and_streaming(ingester, source_dir):
+    """The value stored/compared for idempotency must depend only on the
+    path's position under source_dir, not on source_dir's own absolute
+    prefix -- this is what makes it stable whether the script runs on the
+    host (/mnt/d/fsds-ecommerce/...) or inside the Airflow container
+    (/opt/project/...), unlike the raw absolute path."""
+    offline_path = str(source_dir / "offline" / "customers.parquet")
+    stream_path = str(source_dir / "streaming" / "events.json")
+    assert ingester._relative_source(offline_path) == "offline/customers.parquet"
+    assert ingester._relative_source(stream_path) == "streaming/events.json"
+
+
+def test_ingest_stamps_relative_not_absolute_source_file(ingester, spark, tmp_path):
+    """Regression test for the real bug: two BronzeIngester instances
+    pointed at the same file through different absolute source_dir prefixes
+    (simulating host vs. container execution) must stamp the *same*
+    source_file value, or append_if_new_source's idempotency check silently
+    fails to recognize them as the same file -- confirmed live: order_items
+    and events each ended up double-ingested this way, once from each
+    context."""
+    ingester._ingest_offline_table("customers")
+    result = spark.read.format("delta").load(str(tmp_path / "bronze" / "customers"))
+    row = result.collect()[0]
+    assert row["source_file"] == "offline/customers.parquet"
+    assert not row["source_file"].startswith("/"), (
+        "source_file must be relative -- an absolute path differs between "
+        "host and container execution even for the identical physical file"
+    )
+
+
 # ── 3. _ingest_offline_table ──────────────────────────────────────────────────
 
 def test_ingest_offline_table_creates_delta_directory(ingester, tmp_path):

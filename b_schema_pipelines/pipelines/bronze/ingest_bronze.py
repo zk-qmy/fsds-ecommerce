@@ -168,25 +168,48 @@ class BronzeIngester(PipelineBase):
             return str(self.output_dir / table)
         return f"{self.output_dir}/{table}"
 
+    def _relative_source(self, source_file: str) -> str:
+        """Path relative to source_dir (e.g. "offline/order_items.parquet"),
+        stored in the source_file column instead of the absolute path.
+
+        The same physical file resolves to a different absolute path
+        depending on whether this script runs on the host
+        (/mnt/d/fsds-ecommerce/...) or inside the Airflow container
+        (/opt/project/...) -- a real bug, found live: append_if_new_source's
+        "already ingested" check compares source_file by exact string, so
+        those two absolute paths for the identical file were never
+        recognized as a duplicate, and order_items/events each ended up
+        ingested twice (once from each context). A relative path is stable
+        across both.
+        """
+        return str(Path(source_file).relative_to(self.source_dir))
+
     def _ingest(self, table: str, source_file: str, read_fn) -> None:
-        """Core ingestion logic shared by offline tables and events."""
+        """Core ingestion logic shared by offline tables and events.
+
+        `source_file` is the real, resolvable path used to actually read the
+        file; the canonical (relative) form is what gets stamped into the
+        source_file column and compared for idempotency -- see
+        `_relative_source`'s docstring for why they need to differ.
+        """
         start_ts = datetime.now()
         input_rows = 0
+        canonical_source = self._relative_source(source_file)
         try:
-            self.log_table_start(table, source_file)
+            self.log_table_start(table, canonical_source)
             if not self.reader.exists(source_file):
                 raise FileNotFoundError(f"source file not found: {source_file}")
             df = read_fn(source_file)
             df.cache()
             input_rows = df.count()
-            df = self._add_ingest_metadata(df, source_file)
+            df = self._add_ingest_metadata(df, canonical_source)
             self._check_quality(df, table, input_rows)
             if table in APPEND_IF_NEW_SOURCE_TABLES:
                 rows_written = self.writer.append_if_new_source(
                     df,
                     self._table_path(table),
                     table,
-                    source_file=source_file,
+                    source_file=canonical_source,
                     row_count=input_rows,
                 )
             else:
